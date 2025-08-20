@@ -80,24 +80,24 @@ phases:
   # Phase 1: Unconditional prior on ~100k images
   - name: "phase1_unconditional"
     type: "unconditional"
-    epochs: 10                          # or tune based on dataset size
+    epochs: 100                          # or tune based on dataset size
     batch_size: 16                      # adjust per GPU memory
-    max_steps: 6250                     # ~100k images at batch_size=16
+    #max_steps: 6250                     # ~100k images at batch_size=16
     datasets: ["sr_caco2", "fmd", "neuronal_cells", "rxrx1"]
-    epochs_to_save: [3, 6, 9, 10]
+    epochs_to_save: [30, 60, 90, 100]
     description: "Unconditional DiT-XL/8 prior on microscopy foundation (~100k images)"
 
   # Phase 2: Conditional control on 60–200k images
   - name: "phase2_conditional"
     type: "conditional"
-    epochs: 12                          # or tune based on dataset size
+    epochs: 120                          # or tune based on dataset size
     batch_size: 16
-    max_steps: 7500                     # ~120k images; use 3750 for ~60k, 12500 for ~200k
+    #max_steps: 7500                     # ~120k images; use 3750 for ~60k, 12500 for ~200k
     datasets: ["sr_caco2", "fmd"]
     base_from_phase: "phase1_unconditional"
     condition_types: ["super_resolution", "denoising", "deblurring"]
     condition_dropout: 0.1
-    epochs_to_save: [4, 8, 12]
+    epochs_to_save: [40, 80, 120]
     description: "Conditional DiT with manual + real degradations (60–200k images)"
 
     # Manual degradation augmentation
