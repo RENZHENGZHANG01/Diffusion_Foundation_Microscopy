@@ -12,13 +12,15 @@ import random
 import numpy as np
 from PIL import Image
 
-# Add processed dataset path - keep external dependency
-sys.path.append('/mnt/e/Microscopy_dataset/processed/foundation')
+# Import processed dataset from local utils
+import sys
+from pathlib import Path
+sys.path.append(str(Path(__file__).parent.parent / 'utils'))
 from processed_dataset import build_manifest_dataset
 
 # Local imports
 from .conditioning import create_microscopy_conditions
-from ..utils.auto_degrade import auto_degrade_with_metadata
+from auto_degrade import auto_degrade_with_metadata
 
 
 class MicroscopyDataset(Dataset):
@@ -154,9 +156,12 @@ class MicroscopyDataset(Dataset):
     def get_weighted_sampler(self):
         """Get WeightedRandomSampler for mixed real + manual degraded dataset"""
         if hasattr(self, 'sample_weights') and self.sample_weights:
+            # Allow optional capping of samples per epoch
+            max_samples = self.phase_config.get('max_samples_per_epoch', len(self.sample_weights))
+            num_samples = min(len(self.sample_weights), int(max_samples))
             return WeightedRandomSampler(
                 weights=self.sample_weights,
-                num_samples=len(self.sample_weights),
+                num_samples=num_samples,
                 replacement=True
             )
         return None
@@ -253,6 +258,14 @@ class MicroscopyDataset(Dataset):
         
         # Create reverse mapping from task to degradation mode using config
         task_to_degradation_map = {task: mode for mode, task in self.degradation_to_task_map.items()}
+        # Provide a default mapping for tasks not explicitly configured (e.g., deblurring)
+        defaults = {
+            'deblurring': 'blur',
+            'denoising': 'noise',
+            'super_resolution': 'downsample',
+        }
+        for task, mode in defaults.items():
+            task_to_degradation_map.setdefault(task, mode)
         
         for condition_type in self.condition_types:
             if condition_type in task_to_degradation_map:

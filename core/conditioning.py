@@ -80,6 +80,17 @@ def convert_to_condition(condition_type: str, image: Union[Image.Image, np.ndarr
         noise_std = param if param else 25.0
         noise = np.random.normal(0, noise_std, image.shape).astype(np.float32)
         condition = np.clip(image.astype(np.float32) + noise, 0, 255).astype(np.uint8)
+    elif condition_type == "deblurring":
+        # Create a blurred version as condition input
+        # If RGB present, blur all channels
+        k = int(param) if param is not None else 5
+        if k % 2 == 0:
+            k += 1
+        if image.ndim == 3:
+            blurred = cv2.GaussianBlur(image, (k, k), 0)
+        else:
+            blurred = cv2.GaussianBlur(image, (k, k), 0)
+        condition = blurred
         
     elif condition_type == "canny":
         # Edge detection
@@ -123,7 +134,7 @@ class DiTConditionEncoder(nn.Module):
         self.encoders = nn.ModuleDict()
         
         for condition_type in condition_types:
-            if condition_type in ["super_resolution", "denoising"]:
+            if condition_type in ["super_resolution", "denoising", "deblurring"]:
                 # Image-based conditions
                 self.encoders[condition_type] = self._create_image_encoder()
             elif condition_type in ["canny", "depth"]:

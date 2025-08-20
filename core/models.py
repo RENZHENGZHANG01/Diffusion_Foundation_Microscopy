@@ -4,6 +4,7 @@ Microscopy Diffusion Models
 DiT-XL/8 based models for microscopy applications
 """
 
+from re import T
 import torch
 import torch.nn as nn
 import lightning as L
@@ -42,9 +43,20 @@ class MicroscopyDiTModel(L.LightningModule):
         model_config = self.config['model']
         
         # Create DiT model. Use dummy single-class labels for unconditional setup.
+        if self.config['vae']['enabled']:
+            # VAE latent-space training: typically 4x64x64 for SD VAEs
+            input_size = model_config.get('latent_size', 64)
+            in_channels = model_config.get('latent_channels', 4)
+        else:
+            # Pixel-space training on microscopy images (single-channel)
+            input_size = model_config['input_size'][0]
+            in_channels = 1
+        
         self.model = DiT_models[model_config['architecture']](
-            input_size=model_config['latent_size'],  # 512//8 = 64 for VAE latents
-            num_classes=1  # use a single dummy class; we pass y=zeros
+            input_size=input_size,
+            in_channels=in_channels,
+            num_classes=1,  # use a single dummy class; we pass y=zeros
+            learn_sigma=True  # Predict variance for efficiency   
         )
         
         # Setup conditioning for Phase 2
@@ -96,12 +108,19 @@ class MicroscopyDiTModel(L.LightningModule):
             self.use_edm = False
     
     def setup_vae(self):
-        """Setup VAE for latent encoding"""
+        """Setup VAE for latent encoding (optional for pixel-level training)"""
         vae_config = self.config['vae']
+        
+        if not vae_config.get('enabled', True):
+            print("[VAE] Disabled - using pixel-level training")
+            self.vae = None
+            return
+        
         try:
             self.vae = AutoencoderKL.from_pretrained(vae_config['model_id'])
             self.vae.requires_grad_(False)
             self.vae.eval()
+            print(f"[VAE] Loaded: {vae_config['model_id']}")
         except Exception as e:
             print(f"[VAE] Failed to load pretrained VAE '{vae_config.get('model_id')}': {e}")
             print("[VAE] Using lightweight dummy VAE encoder for fallback (suitable for smoke tests only)")
@@ -235,7 +254,9 @@ class MicroscopyDiTModel(L.LightningModule):
             if condition_emb is not None:
                 model_output = self.forward(scaled_input, timesteps, condition_emb)
             else:
-                model_output = self.model(scaled_input, timesteps)
+                # Always pass dummy label for DiT
+                y = torch.zeros(scaled_input.shape[0], dtype=torch.long, device=scaled_input.device)
+                model_output = self.model(scaled_input, timesteps, y)
         
         # Compute target
         scheduler_config = self.config.get('scheduler', {})
@@ -250,6 +271,11 @@ class MicroscopyDiTModel(L.LightningModule):
         
         # Compute loss with EDM weighting
         loss_weights = self.scheduler.get_loss_weights(timesteps)
+        # Ensure shapes match for MSE (model_output and target must have same channels)
+        if model_output.shape != target.shape:
+            # In case model predicts 2*C for learned sigma and target is C, match target channels
+            if model_output.shape[1] == target.shape[1] * 2:
+                target = torch.cat([target, target], dim=1)
         loss = torch.nn.functional.mse_loss(model_output, target, reduction='none')
         
         # Apply loss weights
@@ -263,16 +289,25 @@ class MicroscopyDiTModel(L.LightningModule):
     def training_step(self, batch, batch_idx):
         """Training step"""
         
-        # Get images and encode to latents
+        # Get images
         images = batch['image']
         
-        with torch.no_grad():
-            # Convert grayscale to RGB for VAE
-            if images.shape[1] == 1:
-                images = images.repeat(1, 3, 1, 1)
-            
-            # Encode to latent space
-            latents = self.vae.encode(images).latent_dist.sample() * 0.18215
+        # Prepare inputs based on VAE configuration
+        if self.vae is not None:
+            # VAE latent space training
+            with torch.no_grad():
+                # Convert grayscale to RGB for VAE
+                if images.shape[1] == 1:
+                    images = images.repeat(1, 3, 1, 1)
+                
+                # Encode to latent space
+                latents = self.vae.encode(images).latent_dist.sample() * 0.18215
+        else:
+            # Pixel-level training - use images directly
+            latents = images
+            # Ensure single channel for microscopy
+            if latents.shape[1] == 3:
+                latents = latents[:, :1, :, :]  # Take first channel only
         
         # Get conditioning
         condition_emb = self.encode_conditions(batch)
@@ -334,10 +369,19 @@ class MicroscopyDiTModel(L.LightningModule):
         images = batch['image']
         
         with torch.no_grad():
-            if images.shape[1] == 1:
-                images = images.repeat(1, 3, 1, 1)
-            
-            latents = self.vae.encode(images).latent_dist.sample() * 0.18215
+            # Prepare inputs based on VAE configuration
+            if self.vae is not None:
+                # VAE latent space validation
+                if images.shape[1] == 1:
+                    images = images.repeat(1, 3, 1, 1)
+                
+                latents = self.vae.encode(images).latent_dist.sample() * 0.18215
+            else:
+                # Pixel-level validation - use images directly
+                latents = images
+                # Ensure single channel for microscopy
+                if latents.shape[1] == 3:
+                    latents = latents[:, :1, :, :]  # Take first channel only
             
             condition_emb = self.encode_conditions(batch)
             
@@ -409,7 +453,35 @@ class MicroscopyEvaluator:
         self.model.eval()
         
         for batch in validation_loader:
-            loss = self.model.validation_step(batch, 0)
+            # Compute loss directly without Lightning logging
+            images = batch['image']
+            
+            # Prepare inputs based on VAE configuration
+            if self.model.vae is not None:
+                if images.shape[1] == 1:
+                    images = images.repeat(1, 3, 1, 1)
+                latents = self.model.vae.encode(images).latent_dist.sample() * 0.18215
+            else:
+                latents = images
+                if latents.shape[1] == 3:
+                    latents = latents[:, :1, :, :]  # Take first channel only
+            
+            condition_emb = self.model.encode_conditions(batch)
+            
+            # Use same loss computation as training but without logging
+            if self.model.use_edm:
+                loss = self.model._compute_edm_loss(latents, condition_emb)
+            else:
+                t = torch.randint(0, self.model.diffusion.num_timesteps, (latents.shape[0],), device=self.model.device)
+                if condition_emb is not None:
+                    loss_dict = self.model.diffusion.training_losses(
+                        lambda x, t: self.model.forward(x, t, condition_emb),
+                        latents, t
+                    )
+                else:
+                    loss_dict = self.model.diffusion.training_losses(self.model.model, latents, t)
+                loss = loss_dict["loss"].mean()
+            
             total_loss += loss.item()
             num_batches += 1
         

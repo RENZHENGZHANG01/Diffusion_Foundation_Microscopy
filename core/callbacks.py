@@ -46,6 +46,9 @@ class EMACallback(Callback):
         ema_model.load_state_dict(model.state_dict())
         ema_model.eval()
         
+        # Move to same device as original model
+        ema_model = ema_model.to(model.device)
+        
         # Disable gradients for EMA model
         for param in ema_model.parameters():
             param.requires_grad = False
@@ -127,7 +130,7 @@ class RealTimeMonitorCallback(Callback):
         self.grad_norms = []
         
         if self.save_plots:
-            self.plot_dir.mkdir(exist_ok=True)
+            self.plot_dir.mkdir(parents=True, exist_ok=True)
         self._last_step_start_time = None
     
     def _log_scalar(self, trainer, tag: str, value: float, step: int):
@@ -355,12 +358,30 @@ class SampleGenerationCallback(Callback):
             pl_module.eval()
             
             with torch.no_grad():
-                # Create random latents
+                # Create random inputs in the correct space
                 device = next(pl_module.parameters()).device
-                latents = torch.randn(
-                    self.num_samples, 4, 64, 64,  # 4 channels, 64x64 latents
-                    device=device
-                )
+                if getattr(pl_module, 'vae', None) is not None:
+                    # Latent space sampling
+                    ch = getattr(pl_module.model, 'in_channels', 4)
+                    # Infer spatial size from patch embedder
+                    try:
+                        num_patches = pl_module.model.x_embedder.num_patches
+                        p = pl_module.model.x_embedder.patch_size[0]
+                        h = w = int(num_patches ** 0.5) * p
+                        # For typical SD VAE latents, h=w=64 with p=8 and 8x8 patches
+                    except Exception:
+                        h = w = 64
+                    latents = torch.randn(self.num_samples, ch, h, w, device=device)
+                else:
+                    # Pixel space sampling (single-channel)
+                    # Use model embedder resolution
+                    try:
+                        num_patches = pl_module.model.x_embedder.num_patches
+                        p = pl_module.model.x_embedder.patch_size[0]
+                        h = w = int(num_patches ** 0.5) * p
+                    except Exception:
+                        h = w = 512
+                    latents = torch.randn(self.num_samples, 1, h, w, device=device)
                 
                 # Generate timesteps (for visualization, use middle timestep)
                 t = torch.full((self.num_samples,), 500, device=device)

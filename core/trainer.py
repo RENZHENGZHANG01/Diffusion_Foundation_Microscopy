@@ -98,8 +98,12 @@ class MicroscopyTrainer:
             '16-mixed' if torch.cuda.is_available() else '32-true'
         )
 
+        max_steps = phase_config.get('max_steps')
+        min_steps = phase_config.get('min_steps')
         trainer = L.Trainer(
             max_epochs=phase_config['epochs'],
+            max_steps=max_steps,
+            min_steps=min_steps,
             callbacks=callbacks,
             logger=loggers,
             accelerator=accelerator,
