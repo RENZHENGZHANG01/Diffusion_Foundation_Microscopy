@@ -2,3 +2,15 @@
 *.jpg
 *.jpeg
 *.gif
+
+# Training outputs
+/training_output/
+/logs/
+/tensorboard/
+/events/
+*.ckpt
+phase_state.json
+
+# Python cache
+__pycache__/
+*.pyc
