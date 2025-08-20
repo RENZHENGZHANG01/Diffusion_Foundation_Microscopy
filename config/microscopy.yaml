@@ -25,8 +25,8 @@ vae:
 
 # Training configuration
 train:
-  accumulate_grad_batches: 1
-  dataloader_workers: 4
+  accumulate_grad_batches: 1            # increase for gradient accumulation if memory-bound
+  dataloader_workers: 8                 # tune per machine; A100/H100 can handle higher
   save_interval: 1000
   gradient_checkpointing: false   # DiT doesn't need this
   save_path: "microscopy_runs"

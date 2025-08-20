@@ -92,11 +92,16 @@ class MicroscopyTrainer:
         loggers = self.setup_phase_loggers(phase_config)
         
         # Create trainer with enhanced monitoring
-        # Choose accelerator/precision safely
+        # Choose accelerator/precision optimized for A100/H100
         accelerator = 'gpu' if torch.cuda.is_available() else 'cpu'
-        precision = 'bf16-mixed' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else (
-            '16-mixed' if torch.cuda.is_available() else '32-true'
-        )
+        # Prefer bf16 on Ampere/Hopper, else fallback to amp fp16; CPU uses 32
+        if torch.cuda.is_available():
+            if torch.cuda.is_bf16_supported():
+                precision = 'bf16-mixed'
+            else:
+                precision = '16-mixed'
+        else:
+            precision = '32-true'
 
         max_steps = phase_config.get('max_steps')
         min_steps = phase_config.get('min_steps')
@@ -108,7 +113,10 @@ class MicroscopyTrainer:
             logger=loggers,
             accelerator=accelerator,
             devices='auto',
-            strategy='ddp_find_unused_parameters_true' if torch.cuda.device_count() > 1 else 'auto',
+            # Use DDP with static graph if 2-4 GPUs; else auto
+            strategy=('ddp' if 1 < torch.cuda.device_count() <= 4 else (
+                'ddp_find_unused_parameters_true' if torch.cuda.device_count() > 4 else 'auto'
+            )),
             precision=precision,
             accumulate_grad_batches=self.config['train']['accumulate_grad_batches'],
             log_every_n_steps=self.config.get('monitoring', {}).get('log_every_n_steps', 10),

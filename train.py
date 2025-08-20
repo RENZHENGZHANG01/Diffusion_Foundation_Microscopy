@@ -54,6 +54,16 @@ def main():
     # Load configuration
     config = load_config(args.config)
     
+    # Performance knobs for A100/H100
+    try:
+        torch.set_float32_matmul_precision('high')
+        if torch.cuda.is_available():
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
+            torch.backends.cudnn.benchmark = True
+    except Exception:
+        pass
+
     print("[INIT] Microscopy Diffusion Training Pipeline")
     print(f"[CONFIG] {args.config}")
     print(f"[RUN_ID] {config['run_id']}")
