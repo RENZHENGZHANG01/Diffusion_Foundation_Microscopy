@@ -4,7 +4,7 @@
 
 # Microscopy Diffusion Prior
 
-Automated phase training pipeline for microscopy diffusion models using DiT-XL/8 architecture.
+Automated degraded condition training pipeline for microscopy diffusion models using DiT-XL/8 architecture.
 
 ## Features
 
