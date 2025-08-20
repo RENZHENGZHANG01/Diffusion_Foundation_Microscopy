@@ -2,25 +2,6 @@
 
 Automated phase training pipeline for microscopy diffusion models using DiT-XL/8 architecture.
 
-## Structure
-
-```
-diffusion-prior/
-├── core/                    # Core modules (DiT-based, self-contained)
-│   ├── dit_models.py       # DiT model architectures
-│   ├── diffusion/          # Diffusion process utilities
-│   ├── conditioning.py     # OminiControl-style conditioning system
-│   ├── models.py           # Microscopy DiT models with conditioning
-│   ├── datasets.py         # Data loading for foundation/degraded pairs  
-│   ├── trainer.py          # Lightning training orchestrator
-│   └── phase_manager.py    # Automated phase transitions
-├── config/
-│   └── microscopy.yaml     # Training configuration
-├── train.py               # Main training script
-├── test_setup.py          # Setup verification
-└── README.md
-```
-
 ## Features
 
 - **DiT-XL/8 Architecture**: Optimized for 512×512 microscopy images
@@ -67,64 +48,6 @@ python train.py --config config/microscopy.yaml --resume
 - **Base Weights**: Auto-loaded from Phase 1 best checkpoint
 - **Epochs**: 30 (configurable)
 
-## Configuration
-
-Key settings in `config/microscopy.yaml`:
-
-```yaml
-model:
-  architecture: "DiT-XL/8"
-  latent_size: 64           # 512//8 for VAE
-  hidden_size: 1152         # DiT-XL dimension
-
-# EDM Scheduler configuration
-scheduler:
-  type: "EDMEulerScheduler"           # EDM scheduler for better sampling
-  num_train_timesteps: 1000
-  sigma_min: 0.002
-  sigma_max: 80.0
-  sigma_data: 0.5
-  rho: 7.0
-  prediction_type: "v_prediction"    # v-parameterization for stability
-
-# EMA configuration
-ema:
-  enabled: true
-  decay: 0.9999
-  update_every: 1
-  start_step: 2000
-
-# Real-time monitoring
-monitoring:
-  log_every_n_steps: 10
-  val_check_interval: 100
-  plot_loss: true
-  plot_lr: true
-  plot_samples: true
-  sample_every_n_epochs: 5
-
-train:
-  batch_size: 2             # Optimized for single GPU
-  dataloader_workers: 4
-
-phases:
-  - name: "phase1_unconditional"
-    epochs: 50
-    epochs_to_save: [12, 25, 37, 50]    # Custom checkpoint epochs
-  - name: "phase2_conditional"
-    epochs: 30
-    epochs_to_save: [8, 15, 22, 30]
-    condition_types: ["super_resolution", "denoising", "canny", "depth"]
-    condition_dropout: 0.1
-```
-
-## Requirements
-
-- PyTorch Lightning
-- Diffusers (for VAE)
-- timm (for ViT components)
-- Standard ML stack (torch, numpy, PIL, etc.)
-
 ## Data Format
 
 Expects processed microscopy data with manifest structure:
@@ -132,80 +55,32 @@ Expects processed microscopy data with manifest structure:
 - Degraded: Corresponding low-res/noisy versions
 - Manifests: CSV files with metadata
 
-## Checkpoints
+## Data Information
 
-- Automatically saves 4 checkpoints per phase (25%, 50%, 75%, 100%)
-- Old checkpoints automatically cleaned up
-- Best model selected based on validation loss
-- Phase 2 auto-loads Phase 1 best weights
+Detailed information about the dataset will be updated here later.
 
-## Logging
+## Citation
 
-- ASCII-only terminal output
-- TensorBoard logs
-- Optional WandB integration
-- Full state tracking in JSON
+### DiT
 
-## Monitoring
-
-Training state persisted in `phase_state.json`:
-- Current phase progress
-- Checkpoint locations
-- Training metrics
-- Event history
-
-## Real-Time Monitoring
-
-The training pipeline provides comprehensive real-time monitoring:
-
-### **Live Plots**
-- **Loss Tracking**: Training and validation loss in real-time
-- **Learning Rate**: Scheduler visualization
-- **Sample Generation**: Generated samples every N epochs
-
-### **Output Structure**
-```
-training_output/
-├── checkpoints/           # Model checkpoints at specified epochs
-│   ├── phase1_unconditional_epoch_012.ckpt
-│   ├── phase1_unconditional_epoch_025.ckpt
-│   └── ...
-├── plots/                 # Real-time training plots
-│   ├── phase1_unconditional/
-│   │   ├── latest_progress.png
-│   │   └── training_progress_step_*.png
-│   └── phase2_conditional/
-├── samples/               # Generated samples during training
-│   ├── phase1_unconditional/
-│   │   ├── samples_epoch_005.png
-│   │   └── samples_epoch_010.png
-│   └── phase2_conditional/
-└── logs/                  # TensorBoard and WandB logs
+```bibtex
+@article{peebles2023scalable,
+  title={Scalable Diffusion Models with Transformers},
+  author={Peebles, William and Xie, Saining},
+  journal={arXiv preprint arXiv:2212.09748},
+  year={2023}
+}
 ```
 
-### **EMA (Exponential Moving Average)**
-- Automatically enabled for stable training
-- Uses EMA weights for validation and final checkpoints
-- Configurable decay rate and start step
+### OminiControl
 
-### **Custom Checkpointing**
-- Save at specific epochs defined in `epochs_to_save`
-- Automatic cleanup (keeps only specified checkpoints)
-- Includes both model and EMA weights
-
-### **EDM Scheduler (Karras et al. 2022)**
-- **Improved Noise Schedule**: Better sigma distribution for training
-- **v-Parameterization**: More stable than epsilon prediction
-- **Continuous Time**: Superior to discrete DDPM formulation
-- **Preconditioning**: Optimal scaling for model inputs/outputs
-- **Loss Weighting**: Theoretically motivated loss weights
-- **Better Sampling**: Euler method with improved trajectories
-
-## Customization
-
-Easily extend by:
-- Adding new condition types in `models.py`
-- Modifying phase configurations and checkpoint schedules
-- Custom dataset loaders in `datasets.py`
-- Additional monitoring callbacks in `callbacks.py`
-- Custom evaluation metrics
+```bibtex
+@misc{tan2024ominicontrol,
+      title={OminiControl: Minimal and Universal Control for Diffusion Transformer}, 
+      author={Zhenxiong Tan and Songhua Liu and Xingyi Yang and Qiaochu Xue and Xinchao Wang},
+      year={2024},
+      eprint={2411.15098},
+      archivePrefix={arXiv},
+      primaryClass={cs.CV}
+}
+```
