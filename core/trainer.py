@@ -54,10 +54,19 @@ class MicroscopyTrainer:
         
         # Setup data
         train_dataset = MicroscopyDataset(self.config, phase_config)
+        
+        # Get weighted sampler for conditional phases to balance degraded datasets
+        sampler = None
+        shuffle = True
+        if phase_config['type'] == 'conditional':
+            sampler = train_dataset.get_weighted_sampler()
+            shuffle = False if sampler else True  # Don't shuffle when using sampler
+        
         train_loader = DataLoader(
             train_dataset,
             batch_size=phase_config['batch_size'],
-            shuffle=True,
+            shuffle=shuffle,
+            sampler=sampler,
             num_workers=self.config['train']['dataloader_workers'],
             pin_memory=True,
             drop_last=True

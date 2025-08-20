@@ -3,8 +3,8 @@
 
 # Data configuration
 data:
-  foundation_path: "/mnt/g/My Drive/Microscopy_Dataset/fluorescence_datasets/processed/foundation"
-  degraded_path: "/mnt/g/My Drive/Microscopy_Dataset/fluorescence_datasets/processed/degraded"
+  foundation_path: "/mnt/e/Microscopy_dataset/processed/foundation"
+  degraded_path: "/mnt/e/Microscopy_dataset/processed/degraded"
 
 # Model configuration
 model:
@@ -77,7 +77,7 @@ phases:
     type: "unconditional"
     epochs: 50                           # Reduced for testing
     batch_size: 2                        # Small batch for 512x512 + DiT-XL
-    datasets: ["sr_caco2", "fmd"]
+    datasets: ["sr_caco2", "fmd", "neuronal_cells", "rxrx1"]
     epochs_to_save: [12, 25, 37, 50]    # Save at 25%, 50%, 75%, 100%
     description: "Learn general microscopy image distribution with DiT-XL/8"
 
@@ -86,9 +86,31 @@ phases:
     type: "conditional"
     epochs: 30                           # Reduced for testing
     batch_size: 2
-    datasets: ["sr_caco2", "fmd"]
+    datasets: ["sr_caco2", "fmd"]        # Only use datasets with real degraded pairs
     base_from_phase: "phase1_unconditional"  # Auto-load best checkpoint
-    condition_types: ["super_resolution", "denoising", "canny", "depth"]  # OminiControl conditions
+    condition_types: ["super_resolution", "denoising", "deblurring"]  # Match actual dataset tasks
     condition_dropout: 0.1               # 10% unconditional training
     epochs_to_save: [8, 15, 22, 30]     # Save at 25%, 50%, 75%, 100%
-    description: "Add OminiControl-style multi-condition control to DiT model"
+    description: "Add conditional control for super-resolution and denoising tasks"
+    
+    # Manual degradation augmentation settings
+    use_manual_degradation: true         # Enable manual degradation from foundation data
+    manual_degradation_ratio: 0.6        # 60% manually degraded, 40% real degraded
+    
+    # Mapping degradation modes to condition types (tasks)
+    degradation_to_task_map:
+      blur: "deblurring"                 # blur degradation -> deblurring task
+      noise: "denoising"                 # noise degradation -> denoising task
+      downsample: "super_resolution"     # downsample degradation -> super_resolution task
+    
+    degradation_modes: ["blur", "noise", "downsample"]  # Available degradation types
+    degradation_params:
+      blur:
+        psf_scale: [1.0, 3.0]           # PSF scaling range
+        extra_sigma_px: [0.0, 2.0]      # Additional blur range
+      noise:
+        target_snr_at_full_scale: [10, 50]  # SNR range
+        read_noise_e: [1.0, 3.0]        # Read noise range
+      downsample:
+        factor: [2, 6]                   # Downsampling factor range
+        upsample_back: true              # Always upsample back to original size
