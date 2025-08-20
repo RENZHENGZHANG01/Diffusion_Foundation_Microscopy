@@ -1,0 +1,94 @@
+# Microscopy Diffusion Training Configuration
+# DiT-XL/8 based 512x512 generation
+
+# Data configuration
+data:
+  foundation_path: "/mnt/g/My Drive/Microscopy_Dataset/fluorescence_datasets/processed/foundation"
+  degraded_path: "/mnt/g/My Drive/Microscopy_Dataset/fluorescence_datasets/processed/degraded"
+
+# Model configuration
+model:
+  architecture: "DiT-XL/8"        # DiT-XL with patch size 8 for 512x512
+  latent_size: 64                 # 512//8 = 64 for VAE latents
+  hidden_size: 1152               # DiT-XL hidden dimension
+  condition_size: [512, 512]
+  target_size: [512, 512]
+
+# VAE configuration
+vae:
+  model_id: "stabilityai/sd-vae-ft-ema"
+
+# Training configuration
+train:
+  accumulate_grad_batches: 1
+  dataloader_workers: 4
+  save_interval: 1000
+  gradient_checkpointing: false   # DiT doesn't need this
+  save_path: "microscopy_runs"
+
+  # Logging (optional)
+  wandb:
+    project: "MicroscopyDiffusion"
+
+# Optimizer configuration
+optimizer:
+  lr: 1e-4
+  weight_decay: 0.01
+  min_lr: 1e-6
+
+# Scheduler configuration
+scheduler:
+  type: "EDMEulerScheduler"           # EDM scheduler for better sampling
+  num_train_timesteps: 1000
+  sigma_min: 0.002
+  sigma_max: 80.0
+  sigma_data: 0.5
+  rho: 7.0
+  prediction_type: "v_prediction"    # v-parameterization for stability
+
+# EMA (Exponential Moving Average) configuration
+ema:
+  enabled: true
+  decay: 0.9999
+  update_every: 1
+  start_step: 2000
+
+# Real-time monitoring
+monitoring:
+  log_every_n_steps: 10
+  val_check_interval: 100
+  progress_bar: true
+  save_top_k: 4
+  monitor_metric: "val_loss"
+  # Image logging
+  image_log_every_n_steps: 200
+  image_log_max_images: 8
+  
+  # Real-time plots
+  plot_loss: true
+  plot_lr: true
+  plot_samples: true
+  sample_every_n_epochs: 5
+
+# Phase definitions
+phases:
+  # Phase 1: Unconditional Foundation Prior
+  - name: "phase1_unconditional"
+    type: "unconditional"
+    epochs: 50                           # Reduced for testing
+    batch_size: 2                        # Small batch for 512x512 + DiT-XL
+    datasets: ["sr_caco2", "fmd"]
+    epochs_to_save: [12, 25, 37, 50]    # Save at 25%, 50%, 75%, 100%
+    description: "Learn general microscopy image distribution with DiT-XL/8"
+
+  # Phase 2: Task-Agnostic Conditional Control (OminiControl style)
+  - name: "phase2_conditional"
+    type: "conditional"
+    epochs: 30                           # Reduced for testing
+    batch_size: 2
+    datasets: ["sr_caco2", "fmd"]
+    base_from_phase: "phase1_unconditional"  # Auto-load best checkpoint
+    condition_types: ["super_resolution", "denoising", "canny", "depth"]  # OminiControl conditions
+    condition_dropout: 0.1               # 10% unconditional training
+    epochs_to_save: [8, 15, 22, 30]     # Save at 25%, 50%, 75%, 100%
+    description: "Add OminiControl-style multi-condition control to DiT model"
