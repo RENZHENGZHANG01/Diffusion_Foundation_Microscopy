@@ -59,9 +59,10 @@ Expects processed microscopy data with manifest structure:
 - Degraded: Corresponding low-res/noisy versions
 - Manifests: CSV files with metadata
 
-## Data Information
+## Data
 
-Detailed information about the dataset will be updated here later.
+The dataset used for training can be found at the following link:
+[Microscopy Dataset](https://drive.google.com/drive/folders/1t-8SP_YxnNr99ELzuNWtRAws_CNlwPK0?usp=sharing)
 
 ## Citation
 
