@@ -72,7 +72,7 @@ def main():
     
     # Create trainer and run pipeline
     trainer = MicroscopyTrainer(config)
-    summary = trainer.run_training_pipeline()
+    summary = trainer.run_training_pipeline(resume=args.resume)
     print(f"[FINAL] Training completed: {summary}")
 
 

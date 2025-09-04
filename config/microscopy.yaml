@@ -27,6 +27,7 @@ vae:
 train:
   accumulate_grad_batches: 1            # increase for gradient accumulation if memory-bound
   dataloader_workers: 8                 # tune per machine; A100/H100 can handle higher
+  #devices: 2                           # force specific number of GPUs (auto-detect if not set)
   save_interval: 1000
   gradient_checkpointing: false   # DiT doesn't need this
   save_path: "microscopy_runs"
@@ -83,6 +84,8 @@ phases:
     epochs: 100                          # or tune based on dataset size
     batch_size: 16                      # adjust per GPU memory
     #max_steps: 6250                     # ~100k images at batch_size=16
+    #resume_from_checkpoint: "runs/checkpoints/phase1_unconditional_best-epoch=001.ckpt"  # manual resume
+    #min_steps: 1000                     # minimum steps before early stop
     datasets: ["sr_caco2", "fmd", "neuronal_cells", "rxrx1"]
     epochs_to_save: [30, 60, 90, 100]
     description: "Unconditional DiT-XL/8 prior on microscopy foundation (~100k images)"
@@ -93,6 +96,8 @@ phases:
     epochs: 120                          # or tune based on dataset size
     batch_size: 16
     #max_steps: 7500                     # ~120k images; use 3750 for ~60k, 12500 for ~200k
+    #resume_from_checkpoint: "runs/checkpoints/phase2_conditional_best-epoch=001.ckpt"  # manual resume
+    #min_steps: 1000                     # minimum steps before early stop
     datasets: ["sr_caco2", "fmd"]
     base_from_phase: "phase1_unconditional"
     condition_types: ["super_resolution", "denoising", "deblurring"]

@@ -11,6 +11,7 @@ from lightning.pytorch.loggers import WandbLogger, TensorBoardLogger
 from torch.utils.data import DataLoader
 from pathlib import Path
 from typing import Dict
+import os
 
 # Local imports
 from .models import MicroscopyDiTModel, MicroscopyEvaluator
@@ -128,8 +129,28 @@ class MicroscopyTrainer:
             benchmark=True  # Enable cudnn benchmark
         )
         
+        # Determine checkpoint path for resume
+        resume_checkpoint = None
+        
+        # First check config for manual checkpoint (works regardless of --resume flag)
+        if phase_config.get('resume_from_checkpoint'):
+            config_checkpoint = phase_config['resume_from_checkpoint']
+            if os.path.exists(config_checkpoint):
+                resume_checkpoint = config_checkpoint
+                print(f"[RESUME] Using config checkpoint: {resume_checkpoint}")
+            else:
+                print(f"[WARNING] Config checkpoint not found: {config_checkpoint}")
+        elif hasattr(self, '_resume') and self._resume:
+            # Auto-discover latest checkpoint for this phase only if --resume flag used
+            discovered_checkpoint = self.phase_manager.find_latest_checkpoint(phase_config['name'])
+            if discovered_checkpoint and os.path.exists(discovered_checkpoint):
+                resume_checkpoint = discovered_checkpoint
+                print(f"[RESUME] Auto-discovered checkpoint: {resume_checkpoint}")
+            elif discovered_checkpoint:
+                print(f"[WARNING] Auto-discovered checkpoint not found: {discovered_checkpoint}")
+        
         # Train
-        trainer.fit(model, train_loader, val_loader)
+        trainer.fit(model, train_loader, val_loader, ckpt_path=resume_checkpoint)
         
         # Get latest checkpoint saved by CustomCheckpointCallback or ModelCheckpoint
         best_checkpoint = None
@@ -260,12 +281,15 @@ class MicroscopyTrainer:
         
         return loggers
     
-    def run_training_pipeline(self):
+    def run_training_pipeline(self, resume=False):
         """Run complete training pipeline"""
         
         print("[PIPELINE] Microscopy Diffusion Training Pipeline")
         print(f"[INFO] Save path: {self.config['train']['save_path']}")
         print(f"[INFO] Total phases: {len(self.config['phases'])}")
+        
+        # Store resume flag
+        self._resume = resume
         
         # Log pipeline start
         self.phase_manager.log_event("Training pipeline started")

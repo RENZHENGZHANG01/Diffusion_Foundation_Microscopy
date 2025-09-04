@@ -117,6 +117,23 @@ class MicroscopyPhaseManager:
         checkpoints = self.state['phase_checkpoints'].get(phase_name, [])
         return checkpoints[-1] if checkpoints else None
     
+    def find_latest_checkpoint(self, phase_name: str):
+        """Find latest checkpoint for a phase from filesystem"""
+        checkpoint_dir = self.save_path / 'checkpoints'
+        if not checkpoint_dir.exists():
+            return None
+        
+        # Look for phase-specific checkpoints
+        pattern = f"{phase_name}*.ckpt"
+        checkpoints = list(checkpoint_dir.glob(pattern))
+        
+        if not checkpoints:
+            return None
+        
+        # Sort by modification time, return latest
+        latest = max(checkpoints, key=lambda p: p.stat().st_mtime)
+        return str(latest)
+    
     def get_training_summary(self):
         """Get training summary"""
         return {
