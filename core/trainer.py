@@ -6,7 +6,7 @@ Main training orchestrator with phase management using DiT-XL/8
 
 import torch
 import lightning as L
-from lightning.pytorch.callbacks import ModelCheckpoint, LearningRateMonitor, EarlyStopping
+from lightning.pytorch.callbacks import ModelCheckpoint, LearningRateMonitor
 from lightning.pytorch.loggers import WandbLogger, TensorBoardLogger
 from torch.utils.data import DataLoader
 from pathlib import Path
@@ -231,14 +231,6 @@ class MicroscopyTrainer:
         )
         callbacks.append(lr_monitor)
         
-        # Early stopping for stability
-        early_stopping = EarlyStopping(
-            monitor=self.config.get('monitoring', {}).get('monitor_metric', 'val_loss'),
-            patience=20,
-            mode='min',
-            min_delta=0.001
-        )
-        callbacks.append(early_stopping)
         
         return callbacks
     
