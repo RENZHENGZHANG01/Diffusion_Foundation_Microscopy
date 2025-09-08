@@ -18,6 +18,8 @@ Automated degraded condition training pipeline for microscopy diffusion models u
 - **Smart Checkpoint Management**: Custom epoch-based checkpointing
 - **State Persistence**: Full resume capability
 - **Lightning Integration**: Professional training with DDP, mixed precision
+- **Comprehensive Sampling System**: Standalone inference with DDPM, DDIM, and EDM Euler support
+- **Conditional Generation**: Full support for Phase 2 models with condition hints
 
 ## Usage
 
@@ -36,6 +38,18 @@ python train.py --config config/microscopy.yaml
 python train.py --config config/microscopy.yaml --resume
 ```
 
+### 4. Generate Samples
+```bash
+# Basic sampling
+python sample.py --config config/sampling.yaml
+
+# Conditional sampling
+python sample.py --config config/sampling.yaml --conditional --condition_types super_resolution,denoising
+
+# Custom parameters
+python sample.py --config config/sampling.yaml --num_samples 8 --method ddim --steps 25
+```
+
 ## Training Phases
 
 ### Phase 1: Unconditional Foundation
@@ -51,6 +65,29 @@ python train.py --config config/microscopy.yaml --resume
 - **Conditions**: Super-resolution, denoising, canny edges, depth estimation
 - **Base Weights**: Auto-loaded from Phase 1 best checkpoint
 - **Epochs**: 30 (configurable)
+
+## Sampling System
+
+The project includes a comprehensive sampling system for generating samples from trained models:
+
+### Sampling Methods
+- **DDPM**: Standard denoising diffusion probabilistic models
+- **DDIM**: Denoising diffusion implicit models (faster, deterministic)
+- **EDM Euler**: Elucidating the Design Space of Diffusion Models
+
+### Features
+- **Standalone Inference**: Generate samples independently from training
+- **Conditional Sampling**: Support for Phase 2 models with condition hints
+- **Batch Generation**: Efficient large-scale sampling
+- **VAE Integration**: Automatic latent space handling
+- **Flexible Configuration**: YAML-based parameter configuration
+
+### Configuration
+Edit `config/sampling.yaml` to customize:
+- Sampling method and steps
+- Output image size and format
+- Conditioning parameters
+- Device and performance settings
 
 ## Data Format
 

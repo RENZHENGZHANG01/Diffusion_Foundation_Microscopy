@@ -1,0 +1,123 @@
+# Sampling Configuration for Microscopy Diffusion Models
+# =====================================================
+
+# Model Configuration
+model:
+  checkpoint_path: "logs/checkpoints/best_model.ckpt"  # Path to trained checkpoint
+  phase: "conditional"  # "unconditional" or "conditional"
+  
+# Sampling Parameters
+sampling:
+  # Sampler type: "ddpm", "ddim", "edm_euler"
+  method: "ddim"
+  
+  # Number of sampling steps
+  num_steps: 50
+  
+  # Guidance scale for conditional sampling (1.0 = no guidance)
+  guidance_scale: 7.5
+  
+  # DDIM eta parameter (0.0 = deterministic, 1.0 = stochastic)
+  ddim_eta: 0.0
+  
+  # EDM-specific parameters
+  edm:
+    sigma_min: 0.002
+    sigma_max: 80.0
+    rho: 7.0
+    solver_order: 1  # Euler = 1, Heun = 2
+  
+# Output Configuration
+output:
+  # Number of samples to generate
+  num_samples: 4
+  
+  # Output image size (will be resized if different from training)
+  image_size: [512, 512]
+  
+  # Output directory
+  save_dir: "generated_samples"
+  
+  # Save individual samples
+  save_individual: true
+  
+  # Save sample grid
+  save_grid: true
+  
+  # Grid layout (e.g., "2x2", "3x3", "auto")
+  grid_layout: "auto"
+  
+  # Image format
+  image_format: "png"
+  
+  # DPI for saved images
+  dpi: 150
+
+# Conditioning Configuration (for Phase 2 models)
+conditioning:
+  # Enable conditional sampling
+  enabled: true
+  
+  # Condition types to use
+  condition_types: ["super_resolution", "denoising", "canny_edge", "depth"]
+  
+  # Condition strength (0.0 to 1.0)
+  condition_strength: 1.0
+  
+  # Random condition dropout probability (0.0 to 1.0)
+  condition_dropout: 0.0
+  
+  # Condition hint generation
+  hints:
+    # Super-resolution scale factor
+    super_resolution_scale: 2.0
+    
+    # Denoising strength
+    denoising_strength: 0.5
+    
+    # Canny edge detection parameters
+    canny_low_threshold: 50
+    canny_high_threshold: 150
+    
+    # Depth estimation parameters
+    depth_min_distance: 0.1
+    depth_max_distance: 10.0
+
+# VAE Configuration
+vae:
+  # Enable VAE decoding (auto-detected from model)
+  enabled: true
+  
+  # VAE model ID (if different from training config)
+  model_id: "stabilityai/stable-diffusion-2-1"
+  
+  # Latent scaling factor
+  scaling_factor: 0.18215
+
+# Device Configuration
+device:
+  # Device to use ("auto", "cuda", "cpu")
+  device: "auto"
+  
+  # Mixed precision inference
+  use_amp: true
+  
+  # Memory optimization
+  enable_attention_slicing: true
+
+# Advanced Options
+advanced:
+  # Random seed for reproducibility
+  seed: 42
+  
+  # Batch size for generation (if generating many samples)
+  batch_size: 1
+  
+  # Progress bar during sampling
+  show_progress: true
+  
+  # Save intermediate steps (for debugging)
+  save_intermediate: false
+  
+  # Intermediate save directory
+  intermediate_dir: "intermediate_samples"

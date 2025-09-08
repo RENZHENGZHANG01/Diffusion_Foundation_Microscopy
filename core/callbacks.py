@@ -353,59 +353,112 @@ class SampleGenerationCallback(Callback):
             self._generate_samples(trainer, pl_module)
     
     def _generate_samples(self, trainer, pl_module):
-        """Generate and save samples"""
+        """Generate and save samples using proper diffusion sampling"""
         try:
             pl_module.eval()
             
             with torch.no_grad():
-                # Create random inputs in the correct space
                 device = next(pl_module.parameters()).device
+                
+                # Determine sampling shape
                 if getattr(pl_module, 'vae', None) is not None:
-                    # Latent space sampling
+                    # VAE latent space sampling
                     ch = getattr(pl_module.model, 'in_channels', 4)
-                    # Infer spatial size from patch embedder
                     try:
                         num_patches = pl_module.model.x_embedder.num_patches
                         p = pl_module.model.x_embedder.patch_size[0]
                         h = w = int(num_patches ** 0.5) * p
-                        # For typical SD VAE latents, h=w=64 with p=8 and 8x8 patches
                     except Exception:
                         h = w = 64
-                    latents = torch.randn(self.num_samples, ch, h, w, device=device)
+                    shape = (self.num_samples, ch, h, w)
                 else:
-                    # Pixel space sampling (single-channel)
-                    # Use model embedder resolution
+                    # Pixel space sampling
                     try:
                         num_patches = pl_module.model.x_embedder.num_patches
                         p = pl_module.model.x_embedder.patch_size[0]
                         h = w = int(num_patches ** 0.5) * p
                     except Exception:
                         h = w = 512
-                    latents = torch.randn(self.num_samples, 1, h, w, device=device)
+                    shape = (self.num_samples, 1, h, w)
                 
-                # Generate timesteps (for visualization, use middle timestep)
-                t = torch.full((self.num_samples,), 500, device=device)
+                # Use proper sampling based on scheduler type
+                if hasattr(pl_module, 'use_edm') and pl_module.use_edm:
+                    # EDM sampling
+                    if hasattr(pl_module, 'scheduler'):
+                        samples = self._generate_edm_samples(pl_module, shape, device)
+                    else:
+                        print(f"[WARNING] EDM scheduler not available - skipping sample generation")
+                        return
+                        
+                elif hasattr(pl_module, 'diffusion') and hasattr(pl_module.diffusion, 'p_sample_loop'):
+                    # Standard diffusion sampling
+                    def model_fn(x, t):
+                        y = torch.zeros(x.shape[0], dtype=torch.long, device=device)
+                        return pl_module.model(x, t, y)
+                    
+                    samples = pl_module.diffusion.p_sample_loop(
+                        model_fn,
+                        shape,
+                        device=device,
+                        progress=False
+                    )
+                else:
+                    print(f"[WARNING] No sampler available - skipping sample generation")
+                    return
                 
-                # Forward pass (this is just for monitoring, not full generation)
-                if hasattr(pl_module, 'model'):
-                    # Try simple forward pass with dummy labels
-                    y = torch.zeros(latents.shape[0], dtype=torch.long, device=device)
-                    outputs = pl_module.model(latents, t, y)
-                    
-                    # Convert to images (simplified)
-                    images = torch.sigmoid(outputs)  # Normalize to [0,1]
-                    images = images.cpu()
-                    
-                    # Save samples
-                    self._save_sample_grid(images, trainer.current_epoch)
-                    
-                    print(f"[SAMPLES] Generated {self.num_samples} samples at epoch {trainer.current_epoch}")
+                # Decode from VAE latents if needed
+                if getattr(pl_module, 'vae', None) is not None:
+                    samples = pl_module.vae.decode(samples / 0.18215).sample
+                    samples = (samples + 1) / 2  # Convert from [-1,1] to [0,1]
+                else:
+                    # For pixel space, apply sigmoid to get [0,1] range
+                    samples = torch.sigmoid(samples)
+                
+                images = samples.cpu()
+                
+                # Save samples
+                self._save_sample_grid(images, trainer.current_epoch)
+                print(f"[SAMPLES] Generated {self.num_samples} samples at epoch {trainer.current_epoch}")
                 
         except Exception as e:
             print(f"[WARNING] Sample generation failed: {e}")
+            import traceback
+            traceback.print_exc()
         
         finally:
             pl_module.train()
+    
+    def _generate_edm_samples(self, pl_module, shape, device):
+        """Generate samples using EDM scheduler"""
+        # Start with pure noise
+        x = torch.randn(shape, device=device)
+        
+        # Get sigma schedule (reverse for sampling)
+        sigmas = pl_module.scheduler.sigmas.to(device)
+        
+        # Simple Euler sampling loop (fewer steps for faster generation)
+        num_steps = min(50, len(sigmas))  # Use 50 steps max for speed
+        step_indices = torch.linspace(0, len(sigmas)-1, num_steps).long()
+        
+        for i, idx in enumerate(step_indices[:-1]):
+            sigma_curr = sigmas[idx]
+            sigma_next = sigmas[step_indices[i+1]]
+            
+            # Scale input according to EDM
+            sigma_batch = sigma_curr.expand(shape[0]).to(device)
+            timestep = torch.full((shape[0],), idx.item(), device=device, dtype=torch.long)
+            scaled_x = pl_module.scheduler.scale_model_input(x, timestep)
+            
+            # Model prediction
+            with torch.no_grad():
+                y = torch.zeros(x.shape[0], dtype=torch.long, device=device)
+                pred = pl_module.model(scaled_x, timestep, y)
+            
+            # Euler step: x_next = x + (sigma_next - sigma_curr) * pred / sigma_curr
+            if sigma_curr > 0:
+                x = x + (sigma_next - sigma_curr) * pred / sigma_curr
+        
+        return x
     
     def _save_sample_grid(self, images, epoch):
         """Save sample grid"""
