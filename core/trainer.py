@@ -176,6 +176,18 @@ class MicroscopyTrainer:
         
         callbacks = []
         
+        # Sample generation callback with EDM support (place BEFORE checkpoints so sampling runs first)
+        if self.config.get('monitoring', {}).get('plot_samples', True):
+            monitoring_config = self.config.get('monitoring', {})
+            sample_callback = SampleGenerationCallback(
+                sample_every_n_epochs=monitoring_config.get('sample_every_n_epochs', 5),
+                num_samples=monitoring_config.get('num_samples', 4),
+                save_dir=str(Path(self.config['train']['save_path']) / 'samples' / phase_config['name']),
+                edm_steps=monitoring_config.get('edm_steps', 100),
+                start_epoch=monitoring_config.get('sample_start_epoch', 10)
+            )
+            callbacks.append(sample_callback)
+        
         # Custom checkpoint callback with epochs_to_save
         checkpoint_dir = Path(self.config['train']['save_path']) / 'checkpoints'
         epochs_to_save = phase_config.get('epochs_to_save', [phase_config['epochs']])
@@ -196,7 +208,8 @@ class MicroscopyTrainer:
                 monitor=monitor_metric,
                 mode='min',
                 save_top_k=1,
-                save_last=True
+                save_last=True,
+                save_weights_only=True
             )
             callbacks.append(model_ckpt)
         except Exception as e:
@@ -225,15 +238,6 @@ class MicroscopyTrainer:
             )
             callbacks.append(monitor_callback)
         
-        # Sample generation callback
-        if self.config.get('monitoring', {}).get('plot_samples', True):
-            sample_callback = SampleGenerationCallback(
-                sample_every_n_epochs=self.config['monitoring'].get('sample_every_n_epochs', 5),
-                num_samples=4,
-                save_dir=str(Path(self.config['train']['save_path']) / 'samples' / phase_config['name'])
-            )
-            callbacks.append(sample_callback)
-
         # Image logging callback for inputs/conditions
         img_log_steps = int(self.config.get('monitoring', {}).get('image_log_every_n_steps', 0) or 0)
         if img_log_steps > 0:

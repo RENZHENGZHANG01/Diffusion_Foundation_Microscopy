@@ -38,9 +38,9 @@ train:
 
 # Optimizer configuration
 optimizer:
-  lr: 1e-4
+  lr: 0.0001
   weight_decay: 0.01
-  min_lr: 1e-6
+  min_lr: 0.000001
 
 # Scheduler configuration
 scheduler:
@@ -48,9 +48,9 @@ scheduler:
   num_train_timesteps: 1000
   sigma_min: 0.002
   sigma_max: 80.0
-  sigma_data: 0.5
+  sigma_data: 0.25
   rho: 7.0
-  prediction_type: "v_prediction"    # v-parameterization for stability
+  prediction_type: "sample" 
 
 # EMA (Exponential Moving Average) configuration
 ema:
@@ -61,8 +61,8 @@ ema:
 
 # Real-time monitoring
 monitoring:
-  log_every_n_steps: 10
-  val_check_interval: 100
+  log_every_n_steps: 1000
+  val_check_interval: 1000
   progress_bar: true
   save_top_k: 4
   monitor_metric: "val_loss"
@@ -75,15 +75,20 @@ monitoring:
   plot_lr: true
   plot_samples: true
   sample_every_n_epochs: 5
+  
+  # EDM sampling configuration for callbacks
+  num_samples: 4                    # Number of samples to generate
+  edm_steps: 100                   # EDM sampling steps (high quality)
+  sample_start_epoch: 1           # Start sampling after epoch 10
 
 ## Phase definitions (production scale)
 phases:
   # Phase 1: Unconditional prior on ~100k images
   - name: "phase1_unconditional"
     type: "unconditional"
-    epochs: 100                          # or tune based on dataset size
-    batch_size: 16                      # adjust per GPU memory
-    #max_steps: 6250                     # ~100k images at batch_size=16
+    epochs: 100                          # TEST: 1 epoch only
+    batch_size: 12                      # TEST: 1 image per batch
+    max_steps: 5000000                   # Large number - let epoch complete naturally
     #resume_from_checkpoint: "runs/checkpoints/phase1_unconditional_best-epoch=001.ckpt"  # manual resume
     #min_steps: 1000                     # minimum steps before early stop
     datasets: ["sr_caco2", "fmd", "neuronal_cells", "rxrx1"]

@@ -31,7 +31,9 @@ class MicroscopySampler:
     
     def __init__(self, config_path: str):
         """Initialize sampler with configuration"""
+        print("[SAMPLER] Starting MicroscopySampler initialization...")
         self.config = self._load_config(config_path)
+        print("[SAMPLER] Config loaded")
         self.device = self._setup_device()
         self.model = None
         self.vae = None
@@ -39,12 +41,17 @@ class MicroscopySampler:
         self.scheduler = None
         self.condition_encoder = None
         self.condition_injector = None
-        
+
         # Setup components
+        print("[SAMPLER] Setting up model...")
         self._setup_model()
+        print("[SAMPLER] Setting up VAE...")
         self._setup_vae()
+        print("[SAMPLER] Setting up sampling...")
         self._setup_sampling()
+        print("[SAMPLER] Setting up conditioning...")
         self._setup_conditioning()
+        print("[SAMPLER] Initialization complete!")
         
     def _load_config(self, config_path: str) -> Dict:
         """Load sampling configuration"""
@@ -73,9 +80,14 @@ class MicroscopySampler:
             raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
         
         print(f"[SAMPLER] Loading model from: {checkpoint_path}")
-        
-        # Load checkpoint
-        checkpoint = torch.load(checkpoint_path, map_location='cpu')
+
+        # Load checkpoint with mmap for large files
+        try:
+            checkpoint = torch.load(checkpoint_path, map_location='cpu', mmap=True)
+            print("[SAMPLER] Checkpoint loaded successfully with mmap")
+        except Exception as e:
+            print(f"[SAMPLER] mmap loading failed, trying standard loading: {e}")
+            checkpoint = torch.load(checkpoint_path, map_location='cpu')
         
         # Extract model configuration from checkpoint
         if 'hyper_parameters' in checkpoint:
@@ -123,49 +135,78 @@ class MicroscopySampler:
         """Setup sampling method based on configuration"""
         sampling_config = self.config['sampling']
         method = sampling_config['method']
-        
+
+        print(f"[SAMPLER] Configured sampling method: {method}")
+
         if method == 'edm_euler':
             self._setup_edm_sampling()
         else:
             self._setup_diffusion_sampling()
-        
+
         print(f"[SAMPLER] Sampling method: {method}")
     
     def _setup_edm_sampling(self):
         """Setup EDM Euler sampling"""
-        sampling_config = self.config['sampling']
+
+        # Always create our own EDM scheduler with correct prediction type
+        # Don't reuse model scheduler as it might have wrong prediction_type from checkpoint
+        print("[SAMPLER] Creating EDM scheduler with sample prediction")
+        
+        # Prefer training-style scheduler block if present to align with training
+        scheduler_config = self.config.get('scheduler', {})
+        sampling_config = self.config.get('sampling', {})
         edm_config = sampling_config.get('edm', {})
-        
-        # Create EDM scheduler
+
+        # Resolve parameters with priority: scheduler block -> sampling.edm/model -> defaults
+        num_train_timesteps = scheduler_config.get('num_train_timesteps')
+        if num_train_timesteps is None:
+            # Fallback to model-specified timesteps as in previous code
+            model_config = self.config.get('model', {})
+            num_train_timesteps = model_config.get('num_train_timesteps', 1000)
+
+        sigma_min = scheduler_config.get('sigma_min', edm_config.get('sigma_min', 0.002))
+        sigma_max = scheduler_config.get('sigma_max', edm_config.get('sigma_max', 80.0))
+        rho = scheduler_config.get('rho', edm_config.get('rho', 7.0))
+        sigma_data = scheduler_config.get('sigma_data', 0.5)
+        prediction_type = scheduler_config.get('prediction_type', 'sample')
+
+        # Create EDM scheduler aligned with training
         self.scheduler = EDMEulerScheduler(
-            num_train_timesteps=1000,
-            sigma_min=edm_config.get('sigma_min', 0.002),
-            sigma_max=edm_config.get('sigma_max', 80.0),
-            rho=edm_config.get('rho', 7.0)
+            num_train_timesteps=num_train_timesteps,
+            sigma_min=sigma_min,
+            sigma_max=sigma_max,
+            sigma_data=sigma_data,
+            rho=rho,
+            prediction_type=prediction_type
         )
-        
+
         # Setup preconditioner if conditional
         if self.config['model']['phase'] == 'conditional':
             self.edm_preconditioner = EDMPreconditioner(
                 model=self.model.model,
-                sigma_data=0.5,
-                prediction_type='v_prediction'
+                sigma_data=sigma_data,
+                prediction_type=prediction_type
             )
-        
+
         self.use_edm = True
     
     def _setup_diffusion_sampling(self):
         """Setup standard diffusion sampling"""
-        # Create diffusion process
-        betas = self._get_beta_schedule('linear', 1000)
-        
+        print("[DIFFUSION] Setting up standard diffusion sampling (DDPM/DDIM)")
+
+        sampling_config = self.config['sampling']
+        num_steps = sampling_config.get('num_steps', 50)
+
+        # Create diffusion process with configurable number of steps
+        betas = self._get_beta_schedule('linear', num_steps)
+
         self.diffusion = GaussianDiffusion(
             betas=betas,
             model_mean_type=ModelMeanType.EPSILON,
             model_var_type=ModelVarType.FIXED_SMALL,
             loss_type=LossType.MSE
         )
-        
+
         self.use_edm = False
     
     def _setup_conditioning(self):
@@ -246,35 +287,82 @@ class MicroscopySampler:
         """Generate samples using EDM Euler sampling"""
         sampling_config = self.config['sampling']
         num_steps = sampling_config['num_steps']
-        
+
+        print(f"[EDM] Starting EDM sampling with shape {shape}, {num_steps} steps")
+
         # Start with pure noise
         x = torch.randn(shape, device=self.device)
-        
-        # Generate timesteps
-        timesteps = self.scheduler.timesteps[:num_steps]
-        
+        print(f"[EDM] Initial noise shape: {x.shape}")
+
+        # Generate sigma indices for sampling (reverse order for denoising)
+        sigma_indices = torch.linspace(0, len(self.scheduler.sigmas) - 1, num_steps, dtype=torch.long)
+        sigmas_to_use = self.scheduler.sigmas[sigma_indices]
+
+        print(f"[EDM] Using {len(sigmas_to_use)} sigma steps: {sigmas_to_use[:5]}...")
+
         # Progress bar
         if self.config['advanced'].get('show_progress', True):
-            timesteps = tqdm(timesteps, desc="EDM Sampling")
-        
+            sigma_indices = tqdm(sigma_indices, desc="EDM Sampling")
+
+        # Mixed precision toggle for memory headroom
+        use_cuda = torch.cuda.is_available() and self.device.type == 'cuda'
+        use_bf16 = use_cuda and torch.cuda.is_bf16_supported()
+        amp_dtype = torch.bfloat16 if use_bf16 else torch.float16
+        y_label = torch.zeros(shape[0], dtype=torch.long, device=self.device)
+
         # Sampling loop
-        for i, t in enumerate(timesteps):
-            # Create timestep tensor
-            timestep = torch.tensor([t], device=self.device).repeat(shape[0])
-            
+        for i, sigma_idx in enumerate(sigma_indices):
+            sigma_val = self.scheduler.sigmas[sigma_idx].to(self.device)
+            print(f"[EDM] Step {i+1}/{len(sigma_indices)}, sigma={sigma_val.item():.6f}")
+
             # Model prediction
             if condition_hints is not None and hasattr(self, 'condition_encoder'):
-                # Conditional sampling
+                # Conditional sampling via preconditioner (handles scaling internally)
                 condition_emb = self._encode_conditions(condition_hints)
-                sigma_vals = self.scheduler.sigmas[t].to(self.device)
-                model_output = self.edm_preconditioner(x, sigma_vals)
+                if use_cuda:
+                    with torch.autocast(device_type='cuda', dtype=amp_dtype):
+                        model_output = self.edm_preconditioner(x, sigma_val)
+                else:
+                    model_output = self.edm_preconditioner(x, sigma_val)
             else:
-                # Unconditional sampling
-                y = torch.zeros(x.shape[0], dtype=torch.long, device=self.device)
-                model_output = self.model.model(x, timestep, y)
-            
-            # Euler step
-            x = self.scheduler.step(model_output, t, x).prev_sample
+                # Unconditional sampling with proper EDM input scaling
+                timestep_vec = torch.full((shape[0],), int(sigma_idx.item()), device=self.device, dtype=torch.long)
+                x_scaled = self.scheduler.scale_model_input(x, timestep_vec)
+                if use_cuda:
+                    with torch.autocast(device_type='cuda', dtype=amp_dtype):
+                        model_output = self.model.model(x_scaled, timestep_vec, y_label)
+                else:
+                    model_output = self.model.model(x_scaled, timestep_vec, y_label)
+                
+                # Ensure channel compatibility: some models output 2*C (mean,var). Keep first C.
+                in_channels = x.shape[1]
+                if model_output.shape[1] != in_channels:
+                    if model_output.shape[1] >= in_channels:
+                        model_output = model_output[:, :in_channels, ...]
+                    else:
+                        pad = in_channels - model_output.shape[1]
+                        model_output = torch.cat([model_output, model_output[:, :pad, ...]], dim=1)
+
+            # Match dtype to running sample tensor to avoid upcasting memory
+            model_output = model_output.to(dtype=x.dtype)
+
+            # Euler step via scheduler
+            try:
+                step_result = self.scheduler.step(model_output, int(sigma_idx.item()), x)
+                x = step_result["prev_sample"] if isinstance(step_result, dict) else step_result
+            except Exception as e:
+                print(f"[EDM] Step function error: {e}")
+                # Manual Euler step as fallback
+                sigma_current = self.scheduler.sigmas[sigma_idx].to(self.device)
+                sigma_next = self.scheduler.sigmas[sigma_idx - 1].to(self.device) if sigma_idx > 0 else torch.tensor(0.0).to(self.device)
+                
+                # Reshape sigmas
+                while len(sigma_current.shape) < len(x.shape):
+                    sigma_current = sigma_current.unsqueeze(-1)
+                    sigma_next = sigma_next.unsqueeze(-1)
+                
+                derivative = (x - model_output) / sigma_current
+                x = x + (sigma_next - sigma_current) * derivative
         
         return x
     
@@ -357,9 +445,17 @@ class MicroscopySampler:
         
         saved_paths = []
         
-        # Convert to numpy and ensure [0, 1] range
+        # Convert to numpy
         samples_np = samples.detach().cpu().numpy()
-        samples_np = np.clip(samples_np, 0, 1)
+        
+        # Debug: print sample statistics before processing
+        # Normalize samples based on their actual range instead of hard clipping
+        if samples_np.max() > 1.0 or samples_np.min() < 0.0:
+            # If values are outside [0,1], normalize to [0,1] range preserving relative intensities
+            samples_np = (samples_np - samples_np.min()) / (samples_np.max() - samples_np.min())
+        else:
+            # Values already in [0,1], just ensure no negatives
+            samples_np = np.clip(samples_np, 0, 1)
         
         # Save individual samples
         if self.config['output'].get('save_individual', True):
@@ -367,6 +463,7 @@ class MicroscopySampler:
                 # Convert to PIL Image
                 if sample.shape[0] == 1:  # Grayscale
                     img_array = (sample[0] * 255).astype(np.uint8)
+                    print(f"[DEBUG] Sample {i} - Array min: {img_array.min()}, max: {img_array.max()}, mean: {img_array.mean():.1f}")
                     img = Image.fromarray(img_array, mode='L')
                 else:  # RGB
                     img_array = (sample.transpose(1, 2, 0) * 255).astype(np.uint8)
@@ -436,9 +533,11 @@ class MicroscopySampler:
     def _get_beta_schedule(self, schedule_name: str, num_timesteps: int) -> np.ndarray:
         """Get beta schedule for diffusion sampling"""
         if schedule_name == "linear":
-            scale = 1000 / num_timesteps
-            beta_start = scale * 0.0001
-            beta_end = scale * 0.02
+            # Use standard DDPM beta schedule parameters, scaled for the given number of timesteps
+            # Original DDPM used 1000 steps with beta_start=0.0001, beta_end=0.02
+            # We scale these parameters to maintain similar noise levels
+            beta_start = 0.0001
+            beta_end = 0.02
             return np.linspace(beta_start, beta_end, num_timesteps, dtype=np.float64)
         else:
             raise NotImplementedError(f"Unknown beta schedule: {schedule_name}")

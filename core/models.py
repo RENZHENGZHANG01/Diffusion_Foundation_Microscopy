@@ -99,7 +99,7 @@ class MicroscopyDiTModel(L.LightningModule):
                 self.edm_preconditioner = EDMPreconditioner(
                     model=self.model,
                     sigma_data=scheduler_config.get('sigma_data', 0.5),
-                    prediction_type=scheduler_config.get('prediction_type', 'v_prediction')
+                    prediction_type=scheduler_config.get('prediction_type', 'sample')
                 )
             
         else:
@@ -260,14 +260,16 @@ class MicroscopyDiTModel(L.LightningModule):
         
         # Compute target
         scheduler_config = self.config.get('scheduler', {})
-        prediction_type = scheduler_config.get('prediction_type', 'v_prediction')
+        prediction_type = scheduler_config.get('prediction_type', 'sample')
         
-        if prediction_type == "epsilon":
-            target = noise
-        elif prediction_type == "v_prediction":
-            target = self.scheduler.get_velocity(latents, noise, timesteps)
-        else:
+        if prediction_type == "sample":
+            # Direct sample prediction (original EDM approach)
             target = latents  # x0 prediction
+        elif prediction_type == "epsilon":
+            target = noise
+        else:
+            # Default to sample prediction (original EDM)
+            target = latents
         
         # Compute loss with EDM weighting
         loss_weights = self.scheduler.get_loss_weights(timesteps)

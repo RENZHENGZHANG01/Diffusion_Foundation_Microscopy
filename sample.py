@@ -163,40 +163,61 @@ def main():
     import yaml
     with open(args.config, 'r') as f:
         config = yaml.safe_load(f)
-    
+
     config = update_config_from_args(config, args)
-    
+
     # Set random seed
     if config['advanced'].get('seed') is not None:
         torch.manual_seed(config['advanced']['seed'])
         np.random.seed(config['advanced']['seed'])
         print(f"[SEED] Set to {config['advanced']['seed']}")
-    
-    # Initialize sampler
+
+    # Save updated config to temporary file for sampler
+    import tempfile
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False) as f:
+        yaml.dump(config, f)
+        temp_config_path = f.name
+
+    # Initialize sampler with updated config
     try:
-        sampler = MicroscopySampler(args.config)
+        sampler = MicroscopySampler(temp_config_path)
         print("[SAMPLER] Initialized successfully")
     except Exception as e:
         print(f"[ERROR] Failed to initialize sampler: {e}")
+        import os
+        os.unlink(temp_config_path)  # Clean up temp file
         return 1
+
+    # Clean up temp file after successful initialization
+    import os
+    try:
+        os.unlink(temp_config_path)
+    except:
+        pass
     
     # Prepare condition hints for conditional sampling
+    print("[MAIN] Preparing condition hints...")
     condition_hints = None
     if config['conditioning'].get('enabled', False):
         condition_types = config['conditioning'].get('condition_types', [])
         if condition_types:
             image_size = tuple(config['output']['image_size'])
             hints_config = config['conditioning'].get('hints', {})
-            
+
             condition_hints = create_condition_hints(
                 image_size=image_size,
                 condition_types=condition_types,
                 hints_config=hints_config
             )
-            
+
             print(f"[CONDITIONS] Generated hints for: {condition_types}")
-    
+        else:
+            print("[CONDITIONS] Conditioning enabled but no condition types specified")
+    else:
+        print("[CONDITIONS] Conditioning disabled (unconditional model)")
+
     # Generate samples
+    print("[MAIN] Starting sample generation...")
     num_samples = config['output']['num_samples']
     batch_size = config['advanced'].get('batch_size', 1)
     

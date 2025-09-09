@@ -10,6 +10,7 @@ import lightning as L
 from lightning.pytorch.callbacks import Callback
 from lightning.pytorch.loggers import TensorBoardLogger
 import matplotlib.pyplot as plt
+from tqdm.auto import tqdm
 import numpy as np
 from typing import Dict, Any, Optional, List
 from pathlib import Path
@@ -281,7 +282,15 @@ class RealTimeMonitorCallback(Callback):
                 if kind == 'loss':
                     ax.plot(self.steps, self.train_losses, 'b-', alpha=0.7, label='Train Loss')
                     if self.val_losses and self.epochs:
-                        val_steps = [e * len(self.steps) // max(self.epochs) for e in self.epochs]
+                        try:
+                            max_epoch = max(self.epochs)
+                        except Exception:
+                            max_epoch = 0
+                        if max_epoch > 0 and len(self.steps) > 0:
+                            val_steps = [int(e * len(self.steps) / max_epoch) for e in self.epochs]
+                        else:
+                            # If we only have epoch 0 so far, place at the start
+                            val_steps = [0 for _ in self.epochs]
                         ax.plot(val_steps, self.val_losses, 'r-', marker='o', label='Val Loss')
                     ax.set_xlabel('Steps')
                     ax.set_ylabel('Loss')
@@ -339,18 +348,39 @@ class SampleGenerationCallback(Callback):
         self,
         sample_every_n_epochs: int = 5,
         num_samples: int = 4,
-        save_dir: str = "training_samples"
+        save_dir: str = "training_samples",
+        edm_steps: int = 100,
+        start_epoch: int = 5
     ):
         super().__init__()
         self.sample_every_n_epochs = sample_every_n_epochs
         self.num_samples = num_samples
+        self.edm_steps = edm_steps
+        # Interpret start_epoch as 1-based (epoch 1 is the first completed epoch)
+        self.start_epoch = max(1, int(start_epoch))
         self.save_dir = Path(save_dir)
-        self.save_dir.mkdir(exist_ok=True)
+        # Ensure nested directories exist
+        self.save_dir.mkdir(parents=True, exist_ok=True)
     
     def on_train_epoch_end(self, trainer, pl_module):
         """Generate samples at specified intervals"""
-        if trainer.current_epoch % self.sample_every_n_epochs == 0:
-            self._generate_samples(trainer, pl_module)
+        # Lightning epochs are 0-based; convert to 1-based for human-friendly config
+        epoch_one_based = int(trainer.current_epoch) + 1
+        should_start = epoch_one_based >= self.start_epoch
+        if should_start:
+            # Trigger on the configured cadence starting at start_epoch
+            if (epoch_one_based - self.start_epoch) % int(self.sample_every_n_epochs) == 0:
+                # Resolve effective edm_steps from model config if available (defensive against mis-wired args)
+                effective_edm_steps = self.edm_steps
+                try:
+                    if hasattr(pl_module, 'config'):
+                        effective_edm_steps = int(pl_module.config.get('monitoring', {}).get('edm_steps', self.edm_steps))
+                except Exception:
+                    effective_edm_steps = self.edm_steps
+                self.edm_steps = effective_edm_steps
+                print(f"[SAMPLES] Starting sample generation at epoch {trainer.current_epoch}"
+                      f" | num_samples={self.num_samples} | edm_steps={effective_edm_steps}")
+                self._generate_samples(trainer, pl_module)
     
     def _generate_samples(self, trainer, pl_module):
         """Generate and save samples using proper diffusion sampling"""
@@ -400,7 +430,7 @@ class SampleGenerationCallback(Callback):
                         model_fn,
                         shape,
                         device=device,
-                        progress=False
+                        progress=True
                     )
                 else:
                     print(f"[WARNING] No sampler available - skipping sample generation")
@@ -437,26 +467,41 @@ class SampleGenerationCallback(Callback):
         sigmas = pl_module.scheduler.sigmas.to(device)
         
         # Simple Euler sampling loop (fewer steps for faster generation)
-        num_steps = min(50, len(sigmas))  # Use 50 steps max for speed
+        # Use configured edm_steps, allow override from model config defensively
+        try:
+            configured_steps = int(self.edm_steps)
+        except Exception:
+            configured_steps = None
+        if configured_steps is None and hasattr(pl_module, 'config'):
+            try:
+                configured_steps = int(pl_module.config.get('monitoring', {}).get('edm_steps', len(sigmas)))
+            except Exception:
+                configured_steps = len(sigmas)
+        if configured_steps is None:
+            configured_steps = len(sigmas)
+        num_steps = max(1, min(int(configured_steps), len(sigmas)))
         step_indices = torch.linspace(0, len(sigmas)-1, num_steps).long()
         
-        for i, idx in enumerate(step_indices[:-1]):
-            sigma_curr = sigmas[idx]
-            sigma_next = sigmas[step_indices[i+1]]
-            
-            # Scale input according to EDM
-            sigma_batch = sigma_curr.expand(shape[0]).to(device)
-            timestep = torch.full((shape[0],), idx.item(), device=device, dtype=torch.long)
-            scaled_x = pl_module.scheduler.scale_model_input(x, timestep)
-            
-            # Model prediction
+        for i, idx in enumerate(tqdm(step_indices[:-1], total=len(step_indices)-1, desc="EDM Sampling", leave=False)):
+            # Scale input according to EDM preconditioning
+            timestep_vec = torch.full((shape[0],), int(idx.item()), device=device, dtype=torch.long)
+            scaled_x = pl_module.scheduler.scale_model_input(x, timestep_vec)
+
+            # Model prediction (prediction_type='sample' → denoised sample x0)
             with torch.no_grad():
                 y = torch.zeros(x.shape[0], dtype=torch.long, device=device)
-                pred = pl_module.model(scaled_x, timestep, y)
-            
-            # Euler step: x_next = x + (sigma_next - sigma_curr) * pred / sigma_curr
-            if sigma_curr > 0:
-                x = x + (sigma_next - sigma_curr) * pred / sigma_curr
+                model_output = pl_module.model(scaled_x, timestep_vec, y)
+                # Ensure channel compatibility
+                if model_output.shape[1] != x.shape[1]:
+                    if model_output.shape[1] >= x.shape[1]:
+                        model_output = model_output[:, :x.shape[1], ...]
+                    else:
+                        pad = x.shape[1] - model_output.shape[1]
+                        model_output = torch.cat([model_output, model_output[:, :pad, ...]], dim=1)
+
+            # Advance one Euler step using the scheduler (keeps EDM math consistent)
+            step_out = pl_module.scheduler.step(model_output, int(idx.item()), x)
+            x = step_out["prev_sample"] if isinstance(step_out, dict) else step_out
         
         return x
     
@@ -632,8 +677,13 @@ class CustomCheckpointCallback(Callback):
         try:
             checkpoint_path = self.save_dir / f"{self.phase_name}_epoch_{epoch:03d}.ckpt"
             
-            # Save Lightning checkpoint
-            trainer.save_checkpoint(checkpoint_path)
+            # Save Lightning checkpoint (weights only to reduce I/O stalls)
+            import time
+            start_t = time.time()
+            print(f"[CHECKPOINT] Saving (weights_only=True) to: {checkpoint_path}")
+            trainer.save_checkpoint(checkpoint_path, weights_only=True)
+            dur = time.time() - start_t
+            print(f"[CHECKPOINT] Saved in {dur:.2f}s: {checkpoint_path}")
             
             print(f"[CHECKPOINT] Saved: {checkpoint_path}")
             

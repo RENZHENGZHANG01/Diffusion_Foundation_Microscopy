@@ -3,13 +3,14 @@
 
 # Model Configuration
 model:
-  checkpoint_path: "logs/checkpoints/best_model.ckpt"  # Path to trained checkpoint
-  phase: "conditional"  # "unconditional" or "conditional"
+  checkpoint_path: "checkpoints/last.ckpt"  # Path to trained checkpoint
+  phase: "unconditional"  # "unconditional" or "conditional"
+  num_train_timesteps: 1000  # Number of timesteps used during training
   
 # Sampling Parameters
 sampling:
   # Sampler type: "ddpm", "ddim", "edm_euler"
-  method: "ddim"
+  method: "edm_euler"
   
   # Number of sampling steps
   num_steps: 50
@@ -22,6 +23,7 @@ sampling:
   
   # EDM-specific parameters
   edm:
+    sigma_data: 0.25
     sigma_min: 0.002
     sigma_max: 80.0
     rho: 7.0
@@ -56,7 +58,7 @@ output:
 # Conditioning Configuration (for Phase 2 models)
 conditioning:
   # Enable conditional sampling
-  enabled: true
+  enabled: false
   
   # Condition types to use
   condition_types: ["super_resolution", "denoising", "canny_edge", "depth"]
@@ -86,7 +88,7 @@ conditioning:
 # VAE Configuration
 vae:
   # Enable VAE decoding (auto-detected from model)
-  enabled: true
+  enabled: false
   
   # VAE model ID (if different from training config)
   model_id: "stabilityai/stable-diffusion-2-1"

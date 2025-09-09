@@ -258,7 +258,7 @@ class PreprocessedMicroscopyDataset(Dataset):
             print(f"[DEBUG] Found {len(csv_rows)} rows in manifest")
             
             for i, rec in enumerate(csv_rows):
-                if i % 1000 == 0:
+                if i % 10000 == 0:
                     print(f"[DEBUG] Processing row {i}/{len(csv_rows)}")
                 img_path = rec.get('image') or ''
                 if not os.path.isabs(img_path):
@@ -272,6 +272,13 @@ class PreprocessedMicroscopyDataset(Dataset):
                     png_path = os.path.join(ds_dir, 'images', f'{rec.get("id", base_name)}.png')
                     if os.path.exists(png_path):
                         img_path = png_path
+                
+                # Handle case where manifest has original filename but files are renamed with ID
+                if not os.path.exists(img_path):
+                    # Try finding file using the ID instead of original filename
+                    id_based_path = os.path.join(ds_dir, 'images', f'{rec.get("id", "")}.png')
+                    if os.path.exists(id_based_path):
+                        img_path = id_based_path
                 
                 # Parse channel_idx - can be empty string or integer
                 channel_idx_raw = rec.get('channel_idx', '')

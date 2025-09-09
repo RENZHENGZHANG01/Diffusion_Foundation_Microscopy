@@ -247,7 +247,7 @@ def test_edm_scheduler():
             sigma_max=80.0,
             sigma_data=0.5,
             rho=7.0,
-            prediction_type="v_prediction"
+            prediction_type="sample"
         )
         
         print(f"[SUCCESS] EDM scheduler created with {len(scheduler.sigmas)} timesteps")

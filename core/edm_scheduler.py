@@ -26,7 +26,7 @@ class EDMEulerScheduler:
         sigma_max: float = 80.0,
         sigma_data: float = 0.5,
         rho: float = 7.0,
-        prediction_type: str = "v_prediction",
+        prediction_type: str = "sample",
         device: Optional[torch.device] = None
     ):
         self.num_train_timesteps = num_train_timesteps
@@ -171,16 +171,14 @@ class EDMEulerScheduler:
             sigma_prev = sigma_prev.unsqueeze(-1)
         
         # Convert model output to denoised sample
-        if self.prediction_type == "epsilon":
-            # ε-prediction: x_0 = (x - σ * ε) / 1
+        if self.prediction_type == "sample":
+            # Direct sample prediction (original EDM approach)
+            denoised = model_output
+        elif self.prediction_type == "epsilon":
+            # ε-prediction: x_0 = x - σ * ε
             denoised = sample - sigma * model_output
-        elif self.prediction_type == "v_prediction":
-            # v-prediction: x_0 = α_t * x - σ_t * v
-            alpha_t = 1.0 / torch.sqrt(1.0 + sigma**2 / self.sigma_data**2)
-            sigma_t = sigma / self.sigma_data / torch.sqrt(1.0 + sigma**2 / self.sigma_data**2)
-            denoised = alpha_t * sample - sigma_t * model_output
         else:
-            # Direct prediction
+            # Fallback to sample prediction (original EDM)
             denoised = model_output
         
         # Euler step: x_{t-1} = x_t + (σ_{t-1} - σ_t) * d_x
@@ -216,7 +214,7 @@ class EDMPreconditioner(nn.Module):
         self,
         model: nn.Module,
         sigma_data: float = 0.5,
-        prediction_type: str = "v_prediction"
+        prediction_type: str = "sample"
     ):
         super().__init__()
         self.model = model
@@ -268,17 +266,16 @@ class EDMPreconditioner(nn.Module):
         if model_output.shape[1] != in_channels:
             model_output = model_output[:, :in_channels, ...]
 
-        # Apply output scaling
-        if self.prediction_type == "v_prediction":
-            # For v-prediction, we need to convert back
-            alpha_t = 1.0 / torch.sqrt(1.0 + sigma**2 / self.sigma_data**2)
-            sigma_t = sigma / self.sigma_data / torch.sqrt(1.0 + sigma**2 / self.sigma_data**2)
-            
-            # Convert v to denoised: x_0 = α_t * x - σ_t * v
-            denoised = alpha_t * x - sigma_t * model_output
-        else:
+        # Apply output scaling based on prediction type
+        if self.prediction_type == "sample":
+            # Direct sample prediction (original EDM approach)
+            denoised = model_output
+        elif self.prediction_type == "epsilon":
             # For epsilon prediction
             denoised = (x - sigma * model_output)
+        else:
+            # Fallback to sample prediction (original EDM)
+            denoised = model_output
         
         # Apply skip connection and output scaling
         result = c_skip * x + c_out * (denoised - c_skip * x)
@@ -297,5 +294,5 @@ def create_edm_scheduler(config: dict) -> EDMEulerScheduler:
         sigma_max=scheduler_config.get('sigma_max', 80.0),
         sigma_data=scheduler_config.get('sigma_data', 0.5),
         rho=scheduler_config.get('rho', 7.0),
-        prediction_type=scheduler_config.get('prediction_type', 'v_prediction')
+        prediction_type=scheduler_config.get('prediction_type', 'sample')
     )
