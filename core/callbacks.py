@@ -462,9 +462,8 @@ class SampleGenerationCallback(Callback):
         """Generate samples using EDM scheduler"""
         # Start with pure noise
         x = torch.randn(shape, device=device)
-        # Debug flags
-        debug_cfg = getattr(pl_module, 'config', {}).get('monitoring', {}) if hasattr(pl_module, 'config') else {}
-        enable_debug = bool(debug_cfg.get('debug_sampling', True))
+        # Debug disabled in production
+        enable_debug = False
         
         # Get scheduler sigma schedule (σ decreases with increasing index)
         sigmas = pl_module.scheduler.sigmas.to(device)
@@ -492,15 +491,12 @@ class SampleGenerationCallback(Callback):
             # Current/next sigmas
             sigma_curr = sigmas[idx]
             sigma_next = sigmas[idx_next]
-            if enable_debug and (i == 0 or i == len(step_indices)//2 or i == len(step_indices)-2):
-                print(f"[EDM DBG][sample] step {i} σ_curr:{sigma_curr.item():.6f} σ_next:{sigma_next.item():.6f}")
+            # debug disabled
 
             # Scale input according to EDM preconditioning (uses σ[idx])
             timestep_vec = torch.full((shape[0],), idx, device=device, dtype=torch.long)
             scaled_x = pl_module.scheduler.scale_model_input(x, timestep_vec)
-            if enable_debug and (i == 0 or i == len(step_indices)//2 or i == len(step_indices)-2):
-                print(f"[EDM DBG][sample] x     min:{x.min():.3f} max:{x.max():.3f} mean:{x.mean():.3f}")
-                print(f"[EDM DBG][sample] x_sc  min:{scaled_x.min():.3f} max:{scaled_x.max():.3f} mean:{scaled_x.mean():.3f}")
+            # debug disabled
 
             # Model prediction with EDM time embedding t_cont = log(σ/σ_data)/4
             with torch.no_grad():
@@ -511,8 +507,7 @@ class SampleGenerationCallback(Callback):
                 # Ensure channel compatibility (use first C if predicting 2C)
                 if model_output.shape[1] != x.shape[1]:
                     model_output = model_output[:, :x.shape[1], ...]
-                if enable_debug and (i == 0 or i == len(step_indices)//2 or i == len(step_indices)-2):
-                    print(f"[EDM DBG][sample] out   min:{model_output.min():.3f} max:{model_output.max():.3f} mean:{model_output.mean():.3f}")
+                # debug disabled
 
             # Manual Euler step: x_{i+1} = x_i + (σ_{i+1} - σ_i) * (x_i - x0_hat)/σ_i
             sigma_curr_b = sigma_curr.to(x.device)
@@ -520,8 +515,7 @@ class SampleGenerationCallback(Callback):
                 sigma_curr_b = sigma_curr_b.unsqueeze(-1)
             derivative = (x - model_output) / sigma_curr_b
             x = x + (sigma_next - sigma_curr) * derivative
-            if enable_debug and (i == 0 or i == len(step_indices)//2 or i == len(step_indices)-2):
-                print(f"[EDM DBG][sample] x_next min:{x.min():.3f} max:{x.max():.3f} mean:{x.mean():.3f}")
+            # debug disabled
         
         return x
     

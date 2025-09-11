@@ -253,13 +253,12 @@ class PreprocessedMicroscopyDataset(Dataset):
                 sources = [base_manifest]
         rows: List[ManifestRow] = []
         for src_path in sources:
-            print(f"[DEBUG] Reading manifest: {src_path}")
+            
             csv_rows = _read_csv_rows(src_path)
-            print(f"[DEBUG] Found {len(csv_rows)} rows in manifest")
+            
             
             for i, rec in enumerate(csv_rows):
-                if i % 10000 == 0:
-                    print(f"[DEBUG] Processing row {i}/{len(csv_rows)}")
+                
                 img_path = rec.get('image') or ''
                 if not os.path.isabs(img_path):
                     # allow relative paths inside manifest

@@ -31,9 +31,9 @@ class MicroscopySampler:
     
     def __init__(self, config_path: str):
         """Initialize sampler with configuration"""
-        print("[SAMPLER] Starting MicroscopySampler initialization...")
+        # initialization log
         self.config = self._load_config(config_path)
-        print("[SAMPLER] Config loaded")
+        
         self.device = self._setup_device()
         self.model = None
         self.vae = None
@@ -43,15 +43,15 @@ class MicroscopySampler:
         self.condition_injector = None
 
         # Setup components
-        print("[SAMPLER] Setting up model...")
+        
         self._setup_model()
-        print("[SAMPLER] Setting up VAE...")
+        
         self._setup_vae()
-        print("[SAMPLER] Setting up sampling...")
+        
         self._setup_sampling()
-        print("[SAMPLER] Setting up conditioning...")
+        
         self._setup_conditioning()
-        print("[SAMPLER] Initialization complete!")
+        
         
     def _load_config(self, config_path: str) -> Dict:
         """Load sampling configuration"""
@@ -69,7 +69,7 @@ class MicroscopySampler:
         else:
             device = torch.device(device_str)
         
-        print(f"[SAMPLER] Using device: {device}")
+        
         return device
     
     def _setup_model(self):
@@ -79,14 +79,14 @@ class MicroscopySampler:
         if not Path(checkpoint_path).exists():
             raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
         
-        print(f"[SAMPLER] Loading model from: {checkpoint_path}")
+        
 
         # Load checkpoint with mmap for large files
         try:
             checkpoint = torch.load(checkpoint_path, map_location='cpu', mmap=True)
-            print("[SAMPLER] Checkpoint loaded successfully with mmap")
+            
         except Exception as e:
-            print(f"[SAMPLER] mmap loading failed, trying standard loading: {e}")
+            
             checkpoint = torch.load(checkpoint_path, map_location='cpu')
         
         # Extract model configuration from checkpoint
@@ -108,14 +108,14 @@ class MicroscopySampler:
         self.model.to(self.device)
         self.model.eval()
         
-        print(f"[SAMPLER] Model loaded successfully")
+        
     
     def _setup_vae(self):
         """Setup VAE for latent space decoding"""
         vae_config = self.config.get('vae', {})
         
         if not vae_config.get('enabled', True):
-            print("[SAMPLER] VAE disabled - using pixel space")
+            
             self.vae = None
             return
         
@@ -125,10 +125,10 @@ class MicroscopySampler:
             self.vae.requires_grad_(False)
             self.vae.to(self.device)
             self.vae.eval()
-            print(f"[SAMPLER] VAE loaded: {model_id}")
+            
         except Exception as e:
-            print(f"[SAMPLER] VAE loading failed: {e}")
-            print("[SAMPLER] Using pixel space fallback")
+            
+            
             self.vae = None
     
     def _setup_sampling(self):
@@ -136,21 +136,21 @@ class MicroscopySampler:
         sampling_config = self.config['sampling']
         method = sampling_config['method']
 
-        print(f"[SAMPLER] Configured sampling method: {method}")
+        
 
         if method == 'edm_euler':
             self._setup_edm_sampling()
         else:
             self._setup_diffusion_sampling()
 
-        print(f"[SAMPLER] Sampling method: {method}")
+        
     
     def _setup_edm_sampling(self):
         """Setup EDM Euler sampling"""
 
         # Always create our own EDM scheduler with correct prediction type
         # Don't reuse model scheduler as it might have wrong prediction_type from checkpoint
-        print("[SAMPLER] Creating EDM scheduler with sample prediction")
+        
         
         # Prefer training-style scheduler block if present to align with training
         scheduler_config = self.config.get('scheduler', {})
@@ -192,7 +192,7 @@ class MicroscopySampler:
     
     def _setup_diffusion_sampling(self):
         """Setup standard diffusion sampling"""
-        print("[DIFFUSION] Setting up standard diffusion sampling (DDPM/DDIM)")
+        
 
         sampling_config = self.config['sampling']
         num_steps = sampling_config.get('num_steps', 50)
@@ -230,7 +230,7 @@ class MicroscopySampler:
             # Setup condition injector
             self.condition_injector = DiTConditionInjector(hidden_size=768)
             
-            print(f"[SAMPLER] Conditioning enabled: {condition_types}")
+            
     
     def generate_samples(
         self,
@@ -260,7 +260,7 @@ class MicroscopySampler:
             torch.manual_seed(seed)
             np.random.seed(seed)
         
-        print(f"[SAMPLER] Generating {num_samples} samples of size {image_size}")
+        
         
         # Determine latent shape
         if self.vae is not None:
@@ -449,7 +449,7 @@ class MicroscopySampler:
                 # Convert to PIL Image
                 if sample.shape[0] == 1:  # Grayscale
                     img_array = (sample[0] * 255).astype(np.uint8)
-                    print(f"[DEBUG] Sample {i} - Array min: {img_array.min()}, max: {img_array.max()}, mean: {img_array.mean():.1f}")
+                    
                     img = Image.fromarray(img_array, mode='L')
                 else:  # RGB
                     img_array = (sample.transpose(1, 2, 0) * 255).astype(np.uint8)
@@ -513,7 +513,7 @@ class MicroscopySampler:
             return str(grid_path)
         
         except Exception as e:
-            print(f"[SAMPLER] Grid saving failed: {e}")
+            
             return None
     
     def _get_beta_schedule(self, schedule_name: str, num_timesteps: int) -> np.ndarray:

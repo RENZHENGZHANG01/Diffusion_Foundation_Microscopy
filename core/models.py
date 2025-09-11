@@ -250,18 +250,7 @@ class MicroscopyDiTModel(L.LightningModule):
         # Scale input
         scaled_input = self.scheduler.scale_model_input(noisy_latents, timesteps)
         
-        if should_debug:
-            # Sigma and time embedding diagnostics
-            sigmas_batch = self.scheduler.sigmas[timesteps.detach().to('cpu')].to(device)
-            c_in = 1.0 / torch.sqrt(sigmas_batch**2 + self.scheduler.sigma_data**2)
-            t_cont_dbg = torch.log(sigmas_batch / self.scheduler.sigma_data) / 4.0
-            print(f"[EDM DBG][train] latents {tuple(latents.shape)} min:{latents.min():.3f} max:{latents.max():.3f} mean:{latents.mean():.3f}")
-            print(f"[EDM DBG][train] noise   {tuple(noise.shape)}   min:{noise.min():.3f} max:{noise.max():.3f} mean:{noise.mean():.3f}")
-            print(f"[EDM DBG][train] noisy   {tuple(noisy_latents.shape)} min:{noisy_latents.min():.3f} max:{noisy_latents.max():.3f} mean:{noisy_latents.mean():.3f}")
-            print(f"[EDM DBG][train] scaled  {tuple(scaled_input.shape)} min:{scaled_input.min():.3f} max:{scaled_input.max():.3f} mean:{scaled_input.mean():.3f}")
-            print(f"[EDM DBG][train] σ batch min:{sigmas_batch.min():.6f} max:{sigmas_batch.max():.6f} mean:{sigmas_batch.mean():.6f}")
-            print(f"[EDM DBG][train] c_in    min:{c_in.min():.6f} max:{c_in.max():.6f} mean:{c_in.mean():.6f}")
-            print(f"[EDM DBG][train] t_cont  min:{t_cont_dbg.min():.6f} max:{t_cont_dbg.max():.6f} mean:{t_cont_dbg.mean():.6f}")
+        # Debug disabled: remove verbose prints
         
         # Forward pass
         if condition_emb is not None and hasattr(self, 'edm_preconditioner'):
@@ -280,8 +269,6 @@ class MicroscopyDiTModel(L.LightningModule):
                 t_cont = torch.log(sigma_vals / self.scheduler.sigma_data) / 4.0  # shape [B]
                 raw_model_output = self.model(scaled_input, t_cont, y)
                 model_output = raw_model_output
-                if should_debug:
-                    print(f"[EDM DBG][train] raw out {tuple(raw_model_output.shape)} min:{raw_model_output.min():.3f} max:{raw_model_output.max():.3f} mean:{raw_model_output.mean():.3f}")
         
         # Compute target
         scheduler_config = self.config.get('scheduler', {})
@@ -302,15 +289,9 @@ class MicroscopyDiTModel(L.LightningModule):
         if model_output.shape != target.shape:
             # If model predicts 2*C (mean, var) and target is C, use the mean part only
             if model_output.shape[1] == target.shape[1] * 2:
-                if 'raw_model_output' in locals() and should_debug:
-                    print(f"[EDM DBG][train] channel mismatch: model {model_output.shape[1]} vs target {target.shape[1]} → slicing to first {target.shape[1]}")
                 model_output = model_output[:, :target.shape[1], ...]
             else:
-                if should_debug:
-                    print(f"[EDM WARN][train] unexpected channel mismatch: model {model_output.shape}, target {target.shape}")
-        if should_debug:
-            print(f"[EDM DBG][train] used out {tuple(model_output.shape)} min:{model_output.min():.3f} max:{model_output.max():.3f} mean:{model_output.mean():.3f}")
-            print(f"[EDM DBG][train] target   {tuple(target.shape)} min:{target.min():.3f} max:{target.max():.3f} mean:{target.mean():.3f}")
+                pass
         loss = torch.nn.functional.mse_loss(model_output, target, reduction='none')
         
         # Apply loss weights
@@ -318,9 +299,7 @@ class MicroscopyDiTModel(L.LightningModule):
             loss_weights = loss_weights.unsqueeze(-1)
         
         weighted_loss = loss * loss_weights
-        if should_debug:
-            print(f"[EDM DBG][train] weight   min:{loss_weights.min():.6f} max:{loss_weights.max():.6f} mean:{loss_weights.mean():.6f}")
-            print(f"[EDM DBG][train] mse mean:{loss.mean():.6f} weighted mean:{weighted_loss.mean():.6f}")
+        # Debug disabled
         
         return weighted_loss.mean()
     
