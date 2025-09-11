@@ -149,8 +149,35 @@ class MicroscopyTrainer:
             elif discovered_checkpoint:
                 print(f"[WARNING] Auto-discovered checkpoint not found: {discovered_checkpoint}")
         
-        # Train
-        trainer.fit(model, train_loader, val_loader, ckpt_path=resume_checkpoint)
+        # Train (handle weights-only checkpoints gracefully)
+        if resume_checkpoint is not None:
+            try:
+                ckpt_meta = torch.load(resume_checkpoint, map_location='cpu')
+                # Treat as full state ONLY if optimizer_states exist and non-empty
+                is_full_state = (
+                    isinstance(ckpt_meta, dict)
+                    and ('optimizer_states' in ckpt_meta)
+                    and isinstance(ckpt_meta.get('optimizer_states'), (list, tuple))
+                    and len(ckpt_meta.get('optimizer_states')) > 0
+                )
+            except Exception:
+                is_full_state = False
+
+            if not is_full_state:
+                # We have a weights-only checkpoint: load weights into the model and start fresh
+                try:
+                    state_dict = ckpt_meta['state_dict'] if isinstance(ckpt_meta, dict) and 'state_dict' in ckpt_meta else ckpt_meta
+                    model.load_state_dict(state_dict, strict=False)
+                    print(f"[RESUME] Loaded weights-only checkpoint into model (no optimizer state): {resume_checkpoint}")
+                except Exception as e:
+                    print(f"[WARNING] Failed loading weights-only checkpoint '{resume_checkpoint}': {e}")
+                resume_ckpt_for_fit = None
+            else:
+                resume_ckpt_for_fit = resume_checkpoint
+        else:
+            resume_ckpt_for_fit = None
+
+        trainer.fit(model, train_loader, val_loader, ckpt_path=resume_ckpt_for_fit)
         
         # Get latest checkpoint saved by CustomCheckpointCallback or ModelCheckpoint
         best_checkpoint = None
