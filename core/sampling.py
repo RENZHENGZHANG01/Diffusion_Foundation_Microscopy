@@ -284,25 +284,21 @@ class MicroscopySampler:
         return samples
     
     def _generate_edm_samples(self, shape: Tuple[int, ...], condition_hints: Optional[Dict] = None) -> torch.Tensor:
-        """Generate samples using EDM Euler sampling"""
+        """Generate samples using EDM Euler sampling aligned with training."""
         sampling_config = self.config['sampling']
-        num_steps = sampling_config['num_steps']
-
-        print(f"[EDM] Starting EDM sampling with shape {shape}, {num_steps} steps")
+        num_steps = int(sampling_config['num_steps'])
 
         # Start with pure noise
         x = torch.randn(shape, device=self.device)
-        print(f"[EDM] Initial noise shape: {x.shape}")
 
-        # Generate sigma indices for sampling (reverse order for denoising)
-        sigma_indices = torch.linspace(0, len(self.scheduler.sigmas) - 1, num_steps, dtype=torch.long)
-        sigmas_to_use = self.scheduler.sigmas[sigma_indices]
-
-        print(f"[EDM] Using {len(sigmas_to_use)} sigma steps: {sigmas_to_use[:5]}...")
-
-        # Progress bar
+        # Build sigma schedule indices and iterate adjacent pairs so we step σ_i -> σ_{i+1}
+        sigmas = self.scheduler.sigmas.to(self.device)
+        num_steps = max(2, min(num_steps, len(sigmas)))
+        step_indices = torch.linspace(0, len(sigmas) - 1, num_steps, dtype=torch.long, device=self.device)
         if self.config['advanced'].get('show_progress', True):
-            sigma_indices = tqdm(sigma_indices, desc="EDM Sampling")
+            step_iter = tqdm(range(len(step_indices) - 1), desc="EDM Sampling")
+        else:
+            step_iter = range(len(step_indices) - 1)
 
         # Mixed precision toggle for memory headroom
         use_cuda = torch.cuda.is_available() and self.device.type == 'cuda'
@@ -310,60 +306,50 @@ class MicroscopySampler:
         amp_dtype = torch.bfloat16 if use_bf16 else torch.float16
         y_label = torch.zeros(shape[0], dtype=torch.long, device=self.device)
 
-        # Sampling loop
-        for i, sigma_idx in enumerate(sigma_indices):
-            sigma_val = self.scheduler.sigmas[sigma_idx].to(self.device)
-            print(f"[EDM] Step {i+1}/{len(sigma_indices)}, sigma={sigma_val.item():.6f}")
+        for i in step_iter:
+            idx = int(step_indices[i].item())
+            idx_next = int(step_indices[i + 1].item())
+            sigma_curr = sigmas[idx]
+            sigma_next = sigmas[idx_next]
 
-            # Model prediction
+            # Scale input according to EDM preconditioning (uses σ[idx])
+            timestep_vec = torch.full((shape[0],), idx, device=self.device, dtype=torch.long)
+            x_scaled = self.scheduler.scale_model_input(x, timestep_vec)
+
+            # Model prediction with EDM time embedding t_cont = log(σ/σ_data)/4
+            t_cont = torch.log(sigma_curr / self.scheduler.sigma_data) / 4.0
+            t_vec = t_cont.expand(shape[0])
+
             if condition_hints is not None and hasattr(self, 'condition_encoder'):
-                # Conditional sampling via preconditioner (handles scaling internally)
+                # Conditional sampling using model.forward with condition embedding
                 condition_emb = self._encode_conditions(condition_hints)
                 if use_cuda:
                     with torch.autocast(device_type='cuda', dtype=amp_dtype):
-                        model_output = self.edm_preconditioner(x, sigma_val)
+                        model_output = self.model.forward(x_scaled, t_vec, condition_emb)
                 else:
-                    model_output = self.edm_preconditioner(x, sigma_val)
+                    model_output = self.model.forward(x_scaled, t_vec, condition_emb)
             else:
-                # Unconditional sampling with proper EDM input scaling
-                timestep_vec = torch.full((shape[0],), int(sigma_idx.item()), device=self.device, dtype=torch.long)
-                x_scaled = self.scheduler.scale_model_input(x, timestep_vec)
                 if use_cuda:
                     with torch.autocast(device_type='cuda', dtype=amp_dtype):
-                        model_output = self.model.model(x_scaled, timestep_vec, y_label)
+                        model_output = self.model.model(x_scaled, t_vec, y_label)
                 else:
-                    model_output = self.model.model(x_scaled, timestep_vec, y_label)
-                
-                # Ensure channel compatibility: some models output 2*C (mean,var). Keep first C.
-                in_channels = x.shape[1]
-                if model_output.shape[1] != in_channels:
-                    if model_output.shape[1] >= in_channels:
-                        model_output = model_output[:, :in_channels, ...]
-                    else:
-                        pad = in_channels - model_output.shape[1]
-                        model_output = torch.cat([model_output, model_output[:, :pad, ...]], dim=1)
+                    model_output = self.model.model(x_scaled, t_vec, y_label)
+
+            # Ensure channel compatibility: some models output 2*C (mean,var). Keep first C.
+            in_channels = x.shape[1]
+            if model_output.shape[1] != in_channels:
+                model_output = model_output[:, :in_channels, ...]
 
             # Match dtype to running sample tensor to avoid upcasting memory
             model_output = model_output.to(dtype=x.dtype)
 
-            # Euler step via scheduler
-            try:
-                step_result = self.scheduler.step(model_output, int(sigma_idx.item()), x)
-                x = step_result["prev_sample"] if isinstance(step_result, dict) else step_result
-            except Exception as e:
-                print(f"[EDM] Step function error: {e}")
-                # Manual Euler step as fallback
-                sigma_current = self.scheduler.sigmas[sigma_idx].to(self.device)
-                sigma_next = self.scheduler.sigmas[sigma_idx - 1].to(self.device) if sigma_idx > 0 else torch.tensor(0.0).to(self.device)
-                
-                # Reshape sigmas
-                while len(sigma_current.shape) < len(x.shape):
-                    sigma_current = sigma_current.unsqueeze(-1)
-                    sigma_next = sigma_next.unsqueeze(-1)
-                
-                derivative = (x - model_output) / sigma_current
-                x = x + (sigma_next - sigma_current) * derivative
-        
+            # Euler step: x_{i+1} = x_i + (σ_{i+1} - σ_i) * (x_i - x0_hat)/σ_i
+            sigma_curr_b = sigma_curr.to(x.device)
+            while len(sigma_curr_b.shape) < len(x.shape):
+                sigma_curr_b = sigma_curr_b.unsqueeze(-1)
+            derivative = (x - model_output) / sigma_curr_b
+            x = x + (sigma_next - sigma_curr) * derivative
+
         return x
     
     def _generate_diffusion_samples(self, shape: Tuple[int, ...], condition_hints: Optional[Dict] = None) -> torch.Tensor:

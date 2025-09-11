@@ -462,8 +462,11 @@ class SampleGenerationCallback(Callback):
         """Generate samples using EDM scheduler"""
         # Start with pure noise
         x = torch.randn(shape, device=device)
+        # Debug flags
+        debug_cfg = getattr(pl_module, 'config', {}).get('monitoring', {}) if hasattr(pl_module, 'config') else {}
+        enable_debug = bool(debug_cfg.get('debug_sampling', True))
         
-        # Get sigma schedule (reverse for sampling)
+        # Get scheduler sigma schedule (σ decreases with increasing index)
         sigmas = pl_module.scheduler.sigmas.to(device)
         
         # Simple Euler sampling loop (fewer steps for faster generation)
@@ -479,29 +482,46 @@ class SampleGenerationCallback(Callback):
                 configured_steps = len(sigmas)
         if configured_steps is None:
             configured_steps = len(sigmas)
-        num_steps = max(1, min(int(configured_steps), len(sigmas)))
-        step_indices = torch.linspace(0, len(sigmas)-1, num_steps).long()
-        
-        for i, idx in enumerate(tqdm(step_indices[:-1], total=len(step_indices)-1, desc="EDM Sampling", leave=False)):
-            # Scale input according to EDM preconditioning
-            timestep_vec = torch.full((shape[0],), int(idx.item()), device=device, dtype=torch.long)
-            scaled_x = pl_module.scheduler.scale_model_input(x, timestep_vec)
+        num_steps = max(2, min(int(configured_steps), len(sigmas)))
+        # Iterate adjacent pairs so we always step from σ_i -> σ_{i+1} (towards σ_min)
+        step_indices = torch.linspace(0, len(sigmas)-1, num_steps).long().to(device)
+        for i, idx in enumerate(tqdm(step_indices[:-1].tolist(), total=len(step_indices)-1, desc="EDM Sampling", leave=False)):
+            idx_next = int(step_indices[i+1].item())
+            idx = int(idx)
 
-            # Model prediction (prediction_type='sample' → denoised sample x0)
+            # Current/next sigmas
+            sigma_curr = sigmas[idx]
+            sigma_next = sigmas[idx_next]
+            if enable_debug and (i == 0 or i == len(step_indices)//2 or i == len(step_indices)-2):
+                print(f"[EDM DBG][sample] step {i} σ_curr:{sigma_curr.item():.6f} σ_next:{sigma_next.item():.6f}")
+
+            # Scale input according to EDM preconditioning (uses σ[idx])
+            timestep_vec = torch.full((shape[0],), idx, device=device, dtype=torch.long)
+            scaled_x = pl_module.scheduler.scale_model_input(x, timestep_vec)
+            if enable_debug and (i == 0 or i == len(step_indices)//2 or i == len(step_indices)-2):
+                print(f"[EDM DBG][sample] x     min:{x.min():.3f} max:{x.max():.3f} mean:{x.mean():.3f}")
+                print(f"[EDM DBG][sample] x_sc  min:{scaled_x.min():.3f} max:{scaled_x.max():.3f} mean:{scaled_x.mean():.3f}")
+
+            # Model prediction with EDM time embedding t_cont = log(σ/σ_data)/4
             with torch.no_grad():
                 y = torch.zeros(x.shape[0], dtype=torch.long, device=device)
-                model_output = pl_module.model(scaled_x, timestep_vec, y)
-                # Ensure channel compatibility
+                t_cont = torch.log(sigma_curr / pl_module.scheduler.sigma_data) / 4.0
+                t_vec = t_cont.expand(x.shape[0])
+                model_output = pl_module.model(scaled_x, t_vec, y)
+                # Ensure channel compatibility (use first C if predicting 2C)
                 if model_output.shape[1] != x.shape[1]:
-                    if model_output.shape[1] >= x.shape[1]:
-                        model_output = model_output[:, :x.shape[1], ...]
-                    else:
-                        pad = x.shape[1] - model_output.shape[1]
-                        model_output = torch.cat([model_output, model_output[:, :pad, ...]], dim=1)
+                    model_output = model_output[:, :x.shape[1], ...]
+                if enable_debug and (i == 0 or i == len(step_indices)//2 or i == len(step_indices)-2):
+                    print(f"[EDM DBG][sample] out   min:{model_output.min():.3f} max:{model_output.max():.3f} mean:{model_output.mean():.3f}")
 
-            # Advance one Euler step using the scheduler (keeps EDM math consistent)
-            step_out = pl_module.scheduler.step(model_output, int(idx.item()), x)
-            x = step_out["prev_sample"] if isinstance(step_out, dict) else step_out
+            # Manual Euler step: x_{i+1} = x_i + (σ_{i+1} - σ_i) * (x_i - x0_hat)/σ_i
+            sigma_curr_b = sigma_curr.to(x.device)
+            while len(sigma_curr_b.shape) < len(x.shape):
+                sigma_curr_b = sigma_curr_b.unsqueeze(-1)
+            derivative = (x - model_output) / sigma_curr_b
+            x = x + (sigma_next - sigma_curr) * derivative
+            if enable_debug and (i == 0 or i == len(step_indices)//2 or i == len(step_indices)-2):
+                print(f"[EDM DBG][sample] x_next min:{x.min():.3f} max:{x.max():.3f} mean:{x.mean():.3f}")
         
         return x
     
