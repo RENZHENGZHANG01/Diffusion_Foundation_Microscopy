@@ -94,13 +94,12 @@ class MicroscopyDiTModel(L.LightningModule):
             self.scheduler = create_edm_scheduler(self.config)
             self.use_edm = True
             
-            # Wrap model with EDM preconditioning if conditional
-            if self.phase_config['type'] == 'conditional':
-                self.edm_preconditioner = EDMPreconditioner(
-                    model=self.model,
-                    sigma_data=scheduler_config.get('sigma_data', 0.4),
-                    prediction_type=scheduler_config.get('prediction_type', 'sample')
-                )
+            # Always wrap model with EDM preconditioning to keep train/sample aligned
+            self.edm_preconditioner = EDMPreconditioner(
+                model=self.model,
+                sigma_data=scheduler_config.get('sigma_data', 0.4),
+                prediction_type=scheduler_config.get('prediction_type', 'sample')
+            )
             
         else:
             print("[DIFFUSION] Using default diffusion")
@@ -247,36 +246,26 @@ class MicroscopyDiTModel(L.LightningModule):
         # Add noise to latents
         noisy_latents = self.scheduler.add_noise(latents, noise, timesteps)
         
-        # Scale input
-        scaled_input = self.scheduler.scale_model_input(noisy_latents, timesteps)
+        # Obtain per-sample sigma values
+        sigma_vals = self.scheduler.sigmas[timesteps.detach().to('cpu')].to(latents.device)
         
-        # Debug disabled: remove verbose prints
-        
-        # Forward pass
-        if condition_emb is not None and hasattr(self, 'edm_preconditioner'):
-            # Use EDM preconditioned model for conditional training
-            sigma_vals = self.scheduler.sigmas[timesteps.detach().to('cpu')].to(latents.device)
-            model_output = self.edm_preconditioner(scaled_input, sigma_vals)
+        # Forward pass via EDM preconditioner (expects unscaled x_t)
+        # This yields the denoised estimate x0_hat aligned with sampling logic
+        if hasattr(self, 'edm_preconditioner'):
+            model_output = self.edm_preconditioner(noisy_latents, sigma_vals)
         else:
-            # Standard forward pass
-            if condition_emb is not None:
-                # Minimal change: keep conditional path as-is (preconditioner covers conditional EDM)
-                model_output = self.forward(scaled_input, timesteps, condition_emb)
-            else:
-                # Unconditional EDM: feed continuous c_noise = log(sigma/sigma_data)/4 to DiT
-                y = torch.zeros(scaled_input.shape[0], dtype=torch.long, device=scaled_input.device)
-                sigma_vals = self.scheduler.sigmas[timesteps.detach().to('cpu')].to(latents.device)
-                t_cont = torch.log(sigma_vals / self.scheduler.sigma_data) / 4.0  # shape [B]
-                raw_model_output = self.model(scaled_input, t_cont, y)
-                model_output = raw_model_output
+            # Fallback (should not happen when EDM is enabled)
+            y = torch.zeros(noisy_latents.shape[0], dtype=torch.long, device=noisy_latents.device)
+            t_cont = torch.log(sigma_vals / self.scheduler.sigma_data) / 4.0
+            model_output = self.model(noisy_latents, t_cont, y)
         
         # Compute target
         scheduler_config = self.config.get('scheduler', {})
         prediction_type = scheduler_config.get('prediction_type', 'sample')
         
         if prediction_type == "sample":
-            # Direct sample prediction (original EDM approach)
-            target = latents  # x0 prediction
+            # Compare denoised estimate x0_hat against clean latents x0
+            target = latents
         elif prediction_type == "epsilon":
             target = noise
         else:
@@ -290,8 +279,6 @@ class MicroscopyDiTModel(L.LightningModule):
             # If model predicts 2*C (mean, var) and target is C, use the mean part only
             if model_output.shape[1] == target.shape[1] * 2:
                 model_output = model_output[:, :target.shape[1], ...]
-            else:
-                pass
         loss = torch.nn.functional.mse_loss(model_output, target, reduction='none')
         
         # Apply loss weights
@@ -305,10 +292,10 @@ class MicroscopyDiTModel(L.LightningModule):
     
     def training_step(self, batch, batch_idx):
         """Training step"""
-        
+
         # Get images
         images = batch['image']
-        
+
         # Prepare inputs based on VAE configuration
         if self.vae is not None:
             # VAE latent space training
@@ -316,7 +303,7 @@ class MicroscopyDiTModel(L.LightningModule):
                 # Convert grayscale to RGB for VAE
                 if images.shape[1] == 1:
                     images = images.repeat(1, 3, 1, 1)
-                
+
                 # Encode to latent space
                 latents = self.vae.encode(images).latent_dist.sample() * 0.18215
         else:
@@ -341,7 +328,7 @@ class MicroscopyDiTModel(L.LightningModule):
         else:
             # Sample timesteps for default diffusion
             t = torch.randint(0, self.diffusion.num_timesteps, (latents.shape[0],), device=self.device)
-            
+
             # Get loss
             if condition_emb is not None:
                 # Conditional training
@@ -352,7 +339,7 @@ class MicroscopyDiTModel(L.LightningModule):
             else:
                 # Unconditional training
                 loss_dict = self.diffusion.training_losses(self.model, latents, t)
-            
+
             loss = loss_dict["loss"].mean()
         
         # Enhanced logging

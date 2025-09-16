@@ -4,20 +4,15 @@ Custom Callbacks for Microscopy Diffusion Training
 EMA, real-time monitoring, and sample generation callbacks
 """
 
+import time
+from pathlib import Path
+from typing import Dict, Any, Optional, List
+
+import matplotlib.pyplot as plt
+import numpy as np
 import torch
-import torch.nn as nn
-import lightning as L
 from lightning.pytorch.callbacks import Callback
 from lightning.pytorch.loggers import TensorBoardLogger
-import matplotlib.pyplot as plt
-from tqdm.auto import tqdm
-import numpy as np
-from typing import Dict, Any, Optional, List
-from pathlib import Path
-import io
-import base64
-from PIL import Image
-import time
 
 
 class EMACallback(Callback):
@@ -163,7 +158,7 @@ class RealTimeMonitorCallback(Callback):
                 loss = outputs.item()
             else:
                 loss = float(outputs)
-            
+
             # Get learning rate
             optimizer = trainer.optimizers[0]
             lr = optimizer.param_groups[0]['lr']
@@ -383,197 +378,34 @@ class SampleGenerationCallback(Callback):
                 self._generate_samples(trainer, pl_module)
     
     def _generate_samples(self, trainer, pl_module):
-        """Generate and save samples using proper diffusion sampling"""
+        """Generate and save samples using centralized sampling system"""
         try:
             pl_module.eval()
-            
+            from .sampling import MicroscopySampler
             with torch.no_grad():
-                device = next(pl_module.parameters()).device
-                
-                # Determine sampling shape
-                if getattr(pl_module, 'vae', None) is not None:
-                    # VAE latent space sampling
-                    ch = getattr(pl_module.model, 'in_channels', 4)
-                    try:
-                        num_patches = pl_module.model.x_embedder.num_patches
-                        p = pl_module.model.x_embedder.patch_size[0]
-                        h = w = int(num_patches ** 0.5) * p
-                    except Exception:
-                        h = w = 64
-                    shape = (self.num_samples, ch, h, w)
-                else:
-                    # Pixel space sampling
-                    try:
-                        num_patches = pl_module.model.x_embedder.num_patches
-                        p = pl_module.model.x_embedder.patch_size[0]
-                        h = w = int(num_patches ** 0.5) * p
-                    except Exception:
-                        h = w = 512
-                    shape = (self.num_samples, 1, h, w)
-                
-                # Use proper sampling based on scheduler type
-                if hasattr(pl_module, 'use_edm') and pl_module.use_edm:
-                    # EDM sampling
-                    if hasattr(pl_module, 'scheduler'):
-                        samples = self._generate_edm_samples(pl_module, shape, device)
-                    else:
-                        print(f"[WARNING] EDM scheduler not available - skipping sample generation")
-                        return
-                        
-                elif hasattr(pl_module, 'diffusion') and hasattr(pl_module.diffusion, 'p_sample_loop'):
-                    # Standard diffusion sampling
-                    def model_fn(x, t):
-                        y = torch.zeros(x.shape[0], dtype=torch.long, device=device)
-                        return pl_module.model(x, t, y)
-                    
-                    samples = pl_module.diffusion.p_sample_loop(
-                        model_fn,
-                        shape,
-                        device=device,
-                        progress=True
-                    )
-                else:
-                    print(f"[WARNING] No sampler available - skipping sample generation")
-                    return
-                
-                # Decode from VAE latents if needed
-                if getattr(pl_module, 'vae', None) is not None:
-                    samples = pl_module.vae.decode(samples / 0.18215).sample
-                    samples = (samples + 1) / 2  # Convert from [-1,1] to [0,1]
-                else:
-                    # For pixel space, convert from [-1,1] to [0,1] range (no sigmoid)
-                    samples = (samples + 1) / 2
-                
-                images = samples.cpu()
-                
-                # Save samples
-                self._save_sample_grid(images, trainer.current_epoch)
+                sampler = MicroscopySampler._create_from_module(pl_module, {
+                    'output': {
+                        'num_samples': self.num_samples,
+                        'image_size': [512, 512],
+                        'save_individual': False,
+                        'save_grid': True,
+                        'image_format': 'png',
+                        'dpi': 150
+                    },
+                    'sampling': {'num_steps': self.edm_steps},
+                    'advanced': {'show_progress': False, 'save_intermediate': False}
+                })
+                samples = sampler.generate_samples(num_samples=self.num_samples, seed=None)
+                prefix = f"epoch_{trainer.current_epoch:03d}"
+                saved_paths = sampler.save_samples(samples, str(self.save_dir), prefix)
                 print(f"[SAMPLES] Generated {self.num_samples} samples at epoch {trainer.current_epoch}")
-                
+                print(f"[SAMPLES] Saved to {len(saved_paths)} files: {saved_paths}")
         except Exception as e:
             print(f"[WARNING] Sample generation failed: {e}")
-            import traceback
-            traceback.print_exc()
-        
         finally:
             pl_module.train()
     
-    def _generate_edm_samples(self, pl_module, shape, device):
-        """Generate samples using EDM scheduler"""
-        # Start with pure noise
-        x = torch.randn(shape, device=device)
-        # Debug disabled in production
-        enable_debug = False
-        
-        # Get scheduler sigma schedule (σ decreases with increasing index)
-        sigmas = pl_module.scheduler.sigmas.to(device)
-        
-        # Simple Euler sampling loop (fewer steps for faster generation)
-        # Use configured edm_steps, allow override from model config defensively
-        try:
-            configured_steps = int(self.edm_steps)
-        except Exception:
-            configured_steps = None
-        if configured_steps is None and hasattr(pl_module, 'config'):
-            try:
-                configured_steps = int(pl_module.config.get('monitoring', {}).get('edm_steps', len(sigmas)))
-            except Exception:
-                configured_steps = len(sigmas)
-        if configured_steps is None:
-            configured_steps = len(sigmas)
-        num_steps = max(2, min(int(configured_steps), len(sigmas)))
-        # Iterate adjacent pairs so we always step from σ_i -> σ_{i+1} (towards σ_min)
-        step_indices = torch.linspace(0, len(sigmas)-1, num_steps).long().to(device)
-        for i, idx in enumerate(tqdm(step_indices[:-1].tolist(), total=len(step_indices)-1, desc="EDM Sampling", leave=False)):
-            idx_next = int(step_indices[i+1].item())
-            idx = int(idx)
-
-            # Current/next sigmas
-            sigma_curr = sigmas[idx]
-            sigma_next = sigmas[idx_next]
-            # debug disabled
-
-            # Scale input according to EDM preconditioning (uses σ[idx])
-            timestep_vec = torch.full((shape[0],), idx, device=device, dtype=torch.long)
-            scaled_x = pl_module.scheduler.scale_model_input(x, timestep_vec)
-            # debug disabled
-
-            # Model prediction with EDM time embedding t_cont = log(σ/σ_data)/4
-            with torch.no_grad():
-                y = torch.zeros(x.shape[0], dtype=torch.long, device=device)
-                t_cont = torch.log(sigma_curr / pl_module.scheduler.sigma_data) / 4.0
-                t_vec = t_cont.expand(x.shape[0])
-                model_output = pl_module.model(scaled_x, t_vec, y)
-                # Ensure channel compatibility (use first C if predicting 2C)
-                if model_output.shape[1] != x.shape[1]:
-                    model_output = model_output[:, :x.shape[1], ...]
-                # debug disabled
-
-            # Apply EDM boundary condition scaling to get proper x0 prediction
-            c_skip, c_out = pl_module.scheduler.get_scalings_for_boundary_condition(timestep_vec)
-            while len(c_skip.shape) < len(x.shape):
-                c_skip = c_skip.unsqueeze(-1)
-                c_out = c_out.unsqueeze(-1)
-
-            # EDM boundary condition: x0_hat = c_skip * x_scaled + c_out * model_output
-            x0_hat = c_skip * scaled_x + c_out * model_output
-
-            # Manual Euler step: x_{i+1} = x_i + (σ_{i+1} - σ_i) * (x_i - x0_hat)/σ_i
-            sigma_curr_b = sigma_curr.to(x.device)
-            while len(sigma_curr_b.shape) < len(x.shape):
-                sigma_curr_b = sigma_curr_b.unsqueeze(-1)
-            derivative = (x - x0_hat) / sigma_curr_b
-            x = x + (sigma_next - sigma_curr) * derivative
-            # debug disabled
-        
-        return x
     
-    def _save_sample_grid(self, images, epoch):
-        """Save sample grid"""
-        try:
-            # Create grid
-            grid_size = int(np.ceil(np.sqrt(self.num_samples)))
-            fig, axes = plt.subplots(grid_size, grid_size, figsize=(10, 10))
-            
-            for i in range(self.num_samples):
-                row = i // grid_size
-                col = i % grid_size
-                
-                if grid_size == 1:
-                    ax = axes
-                else:
-                    ax = axes[row, col] if grid_size > 1 else axes[col]
-                
-                # Convert tensor to image
-                if images[i].shape[0] == 4:  # 4 channels
-                    # Take first channel or average
-                    img = images[i][0]
-                elif images[i].shape[0] == 1:  # 1 channel
-                    img = images[i][0]
-                else:
-                    img = images[i].mean(0)  # Average channels
-                
-                ax.imshow(img, cmap='gray')
-                ax.axis('off')
-                ax.set_title(f'Sample {i+1}')
-            
-            # Hide empty subplots
-            for i in range(self.num_samples, grid_size * grid_size):
-                row = i // grid_size
-                col = i % grid_size
-                ax = axes[row, col] if grid_size > 1 else axes[col]
-                ax.axis('off')
-            
-            plt.suptitle(f'Generated Samples - Epoch {epoch}')
-            plt.tight_layout()
-            
-            # Save
-            save_path = self.save_dir / f"samples_epoch_{epoch:03d}.png"
-            plt.savefig(save_path, dpi=150, bbox_inches='tight')
-            plt.close()
-            
-        except Exception as e:
-            print(f"[WARNING] Sample grid saving failed: {e}")
 
 
 class ImageLoggingCallback(Callback):
@@ -691,7 +523,6 @@ class CustomCheckpointCallback(Callback):
     def on_train_epoch_end(self, trainer, pl_module):
         """Save checkpoint at specified epochs"""
         current_epoch = trainer.current_epoch
-        
         if current_epoch in self.epochs_to_save:
             self._save_checkpoint(trainer, pl_module, current_epoch)
     
@@ -699,16 +530,11 @@ class CustomCheckpointCallback(Callback):
         """Save model checkpoint"""
         try:
             checkpoint_path = self.save_dir / f"{self.phase_name}_epoch_{epoch:03d}.ckpt"
-            
-            # Save Lightning checkpoint (weights only to reduce I/O stalls)
-            import time
             start_t = time.time()
             print(f"[CHECKPOINT] Saving (weights_only=True) to: {checkpoint_path}")
             trainer.save_checkpoint(checkpoint_path, weights_only=True)
             dur = time.time() - start_t
             print(f"[CHECKPOINT] Saved in {dur:.2f}s: {checkpoint_path}")
-            
-            print(f"[CHECKPOINT] Saved: {checkpoint_path}")
             
         except Exception as e:
             print(f"[ERROR] Checkpoint save failed: {e}")

@@ -17,7 +17,6 @@ from tqdm.auto import tqdm
 
 # Local imports
 from .models import MicroscopyDiTModel
-from .diffusion.gaussian_diffusion import GaussianDiffusion, ModelMeanType, ModelVarType, LossType
 from .edm_scheduler import EDMEulerScheduler, EDMPreconditioner
 from .conditioning import DiTConditionEncoder, DiTConditionInjector, create_microscopy_conditions
 from diffusers.models import AutoencoderKL
@@ -133,17 +132,8 @@ class MicroscopySampler:
     
     def _setup_sampling(self):
         """Setup sampling method based on configuration"""
-        sampling_config = self.config['sampling']
-        method = sampling_config['method']
-
-        
-
-        if method == 'edm_euler':
-            self._setup_edm_sampling()
-        else:
-            self._setup_diffusion_sampling()
-
-        
+        # Only EDM sampling is supported
+        self._setup_edm_sampling()
     
     def _setup_edm_sampling(self):
         """Setup EDM Euler sampling"""
@@ -189,25 +179,6 @@ class MicroscopySampler:
             )
 
         self.use_edm = True
-    
-    def _setup_diffusion_sampling(self):
-        """Setup standard diffusion sampling"""
-        
-
-        sampling_config = self.config['sampling']
-        num_steps = sampling_config.get('num_steps', 50)
-
-        # Create diffusion process with configurable number of steps
-        betas = self._get_beta_schedule('linear', num_steps)
-
-        self.diffusion = GaussianDiffusion(
-            betas=betas,
-            model_mean_type=ModelMeanType.EPSILON,
-            model_var_type=ModelVarType.FIXED_SMALL,
-            loss_type=LossType.MSE
-        )
-
-        self.use_edm = False
     
     def _setup_conditioning(self):
         """Setup conditioning for Phase 2 models"""
@@ -272,10 +243,7 @@ class MicroscopySampler:
             shape = (num_samples, 1, image_size[0], image_size[1])
         
         # Generate samples
-        if self.use_edm:
-            samples = self._generate_edm_samples(shape, condition_hints)
-        else:
-            samples = self._generate_diffusion_samples(shape, condition_hints)
+        samples = self._generate_edm_samples(shape, condition_hints)
         
         # Decode from latent space if using VAE
         if self.vae is not None:
@@ -288,134 +256,116 @@ class MicroscopySampler:
         sampling_config = self.config['sampling']
         num_steps = int(sampling_config['num_steps'])
 
-        # Start with pure noise
-        x = torch.randn(shape, device=self.device)
-
         # Setup intermediate saving
         save_intermediate = self.config['advanced'].get('save_intermediate', False)
         intermediate_dir = None
         if save_intermediate:
             intermediate_dir = Path(self.config['advanced'].get('intermediate_dir', 'intermediate_samples'))
             intermediate_dir.mkdir(parents=True, exist_ok=True)
-            # Save initial noise
+
+        # Get sigma schedule (decreasing from sigma_max -> sigma_min)
+        sigmas = self.scheduler.sigmas.to(self.device)
+        sigma_data = self.scheduler.sigma_data
+
+        # Optionally sub-sample to num_steps
+        if num_steps is not None and num_steps < len(sigmas):
+            # Choose indices monotonically from 0..len-1
+            idxs = torch.linspace(0, len(sigmas)-1, steps=num_steps).round().long()
+            sigmas = sigmas[idxs]
+
+        # EDM constants as functions of sigma
+        def c_skip(s): return (sigma_data**2) / (s**2 + sigma_data**2)
+        def c_out(s):  return s * sigma_data / torch.sqrt(s**2 + sigma_data**2)
+        def c_in(s):   return 1.0 / torch.sqrt(s**2 + sigma_data**2)
+        def c_noise(s): return torch.log(s / sigma_data) / 4.0
+
+        # Initialize x ~ N(0, sigma_max^2 I)
+        x = torch.randn(shape, device=self.device) * sigmas[0]
+
+        if save_intermediate:
             self._save_intermediate_step(x, intermediate_dir, 0, "noise")
 
-        # Build sigma schedule indices and iterate adjacent pairs so we step σ_i -> σ_{i+1}
-        sigmas = self.scheduler.sigmas.to(self.device)
-        num_steps = max(2, min(num_steps, len(sigmas)))
-        step_indices = torch.linspace(0, len(sigmas) - 1, num_steps, dtype=torch.long, device=self.device)
         if self.config['advanced'].get('show_progress', True):
-            step_iter = tqdm(range(len(step_indices) - 1), desc="EDM Sampling")
+            step_iter = tqdm(range(len(sigmas) - 1), desc="EDM Sampling")
         else:
-            step_iter = range(len(step_indices) - 1)
+            step_iter = range(len(sigmas) - 1)
 
         # Mixed precision toggle for memory headroom
         use_cuda = torch.cuda.is_available() and self.device.type == 'cuda'
         use_bf16 = use_cuda and torch.cuda.is_bf16_supported()
         amp_dtype = torch.bfloat16 if use_bf16 else torch.float16
         y_label = torch.zeros(shape[0], dtype=torch.long, device=self.device)
+
         with torch.no_grad():
             for i in step_iter:
-                idx = int(step_indices[i].item())
-                idx_next = int(step_indices[i + 1].item())
-                sigma_curr = sigmas[idx]
-                sigma_next = sigmas[idx_next]
+                sigma_i = sigmas[i]
+                sigma_ip1 = sigmas[i+1]
 
-                # Scale input according to EDM preconditioning (uses σ[idx])
-                timestep_vec = torch.full((shape[0],), idx, device=self.device, dtype=torch.long)
-                x_scaled = self.scheduler.scale_model_input(x, timestep_vec)
+                # Prepare per-sample sigma tensors
+                bsz = shape[0]
+                s_vec = sigma_i.expand(bsz) if sigma_i.ndim == 0 else sigma_i
 
-                # Model prediction with EDM time embedding t_cont = log(σ/σ_data)/4
-                t_cont = torch.log(sigma_curr / self.scheduler.sigma_data) / 4.0
-                t_vec = t_cont.expand(shape[0])
+                # Network input preconditioning
+                x_in = c_in(sigma_i).view(-1, 1, 1, 1) * x
+                t_vec = c_noise(sigma_i).expand(bsz)
 
-                if condition_hints is not None and hasattr(self, 'condition_encoder'):
-                    # Conditional sampling using model.forward with condition embedding
-                    condition_emb = self._encode_conditions(condition_hints)
+                # Model forward using EDM preconditioner (must match training call!)
+                if hasattr(self, 'edm_preconditioner') and self.edm_preconditioner is not None:
+                    # Use EDM preconditioner exactly like training
                     if use_cuda:
                         with torch.autocast(device_type='cuda', dtype=amp_dtype):
-                            model_output = self.model.forward(x_scaled, t_vec, condition_emb)
+                            x0_hat = self.edm_preconditioner(x, sigma_i.expand(bsz))
                     else:
-                        model_output = self.model.forward(x_scaled, t_vec, condition_emb)
+                        x0_hat = self.edm_preconditioner(x, sigma_i.expand(bsz))
                 else:
-                    if use_cuda:
-                        with torch.autocast(device_type='cuda', dtype=amp_dtype):
-                            model_output = self.model.model(x_scaled, t_vec, y_label)
+                    # Fallback: manual EDM preconditioning
+                    if condition_hints is not None and hasattr(self, 'condition_encoder'):
+                        # Conditional sampling using model.forward with condition embedding
+                        condition_emb = self._encode_conditions(condition_hints)
+                        if use_cuda:
+                            with torch.autocast(device_type='cuda', dtype=amp_dtype):
+                                model_output = self.model.forward(x_in, t_vec, condition_emb)
+                        else:
+                            model_output = self.model.forward(x_in, t_vec, condition_emb)
                     else:
-                        model_output = self.model.model(x_scaled, t_vec, y_label)
+                        if use_cuda:
+                            with torch.autocast(device_type='cuda', dtype=amp_dtype):
+                                model_output = self.model.model(x_in, t_vec, y_label)
+                        else:
+                            model_output = self.model.model(x_in, t_vec, y_label)
 
-                # Ensure channel compatibility: some models output 2*C (mean,var). Keep first C.
-                in_channels = x.shape[1]
-                if model_output.shape[1] != in_channels:
-                    model_output = model_output[:, :in_channels, ...]
+                    # Ensure channel compatibility: some models output 2*C (mean,var). Keep first C.
+                    in_channels = x.shape[1]
+                    if model_output.shape[1] != in_channels:
+                        model_output = model_output[:, :in_channels, ...]
 
-                # Match dtype to running sample tensor to avoid upcasting memory
-                model_output = model_output.to(dtype=x.dtype)
+                    # Match dtype to running sample tensor to avoid upcasting memory
+                    model_output = model_output.to(dtype=x.dtype)
 
-                # Apply EDM boundary condition scaling to get proper x0 prediction
-                c_skip, c_out = self.scheduler.get_scalings_for_boundary_condition(timestep_vec)
-                while len(c_skip.shape) < len(x.shape):
-                    c_skip = c_skip.unsqueeze(-1)
-                    c_out = c_out.unsqueeze(-1)
+                    # EDM boundary condition / denoised estimate x0_hat
+                    x0_hat = c_skip(sigma_i).view(-1,1,1,1) * x + c_out(sigma_i).view(-1,1,1,1) * model_output
 
-                # EDM boundary condition: x0_hat = c_skip * x_scaled + c_out * model_output
-                x0_hat = c_skip * x_scaled + c_out * model_output
-
-                # Euler step: x_{i+1} = x_i + (σ_{i+1} - σ_i) * (x_i - x0_hat)/σ_i
-                sigma_curr_b = sigma_curr.to(x.device)
-                while len(sigma_curr_b.shape) < len(x.shape):
-                    sigma_curr_b = sigma_curr_b.unsqueeze(-1)
-                derivative = (x - x0_hat) / sigma_curr_b
-                x = x + (sigma_next - sigma_curr) * derivative
+                if i == len(sigmas) - 2:
+                    # Last step: take x0 directly
+                    x = x0_hat
+                else:
+                    # Euler step along sigma
+                    # dx/dsigma = (x - x0_hat)/sigma
+                    d = (x - x0_hat) / sigma_i.view(-1,1,1,1)
+                    x = x + (sigma_ip1 - sigma_i).view(-1,1,1,1) * d
 
                 # Save intermediate steps
                 if save_intermediate and intermediate_dir is not None:
                     # Save every 10 steps or at key points
-                    if (i + 1) % 10 == 0 or (i + 1) == len(step_indices) - 1:
-                        step_name = f"step_{i+1:03d}_sigma_{sigma_next.item():.3f}"
+                    if (i + 1) % 10 == 0 or (i + 1) == len(sigmas) - 1:
+                        step_name = f"step_{i+1:03d}_sigma_{sigma_ip1.item():.3f}"
                         self._save_intermediate_step(x, intermediate_dir, i + 1, step_name)
 
         # Save final result if intermediate saving is enabled
         if save_intermediate and intermediate_dir is not None:
-            self._save_intermediate_step(x, intermediate_dir, len(step_indices), "final")
+            self._save_intermediate_step(x, intermediate_dir, len(sigmas), "final")
 
         return x
-    
-    def _generate_diffusion_samples(self, shape: Tuple[int, ...], condition_hints: Optional[Dict] = None) -> torch.Tensor:
-        """Generate samples using standard diffusion sampling"""
-        sampling_config = self.config['sampling']
-        method = sampling_config['method']
-        num_steps = sampling_config['num_steps']
-        
-        # Create model function
-        def model_fn(x, t):
-            if condition_hints is not None and hasattr(self, 'condition_encoder'):
-                # Conditional sampling
-                condition_emb = self._encode_conditions(condition_hints)
-                return self.model.forward(x, t, condition_emb)
-            else:
-                # Unconditional sampling
-                y = torch.zeros(x.shape[0], dtype=torch.long, device=self.device)
-                return self.model.model(x, t, y)
-        
-        # Choose sampling method
-        if method == 'ddim':
-            samples = self.diffusion.ddim_sample_loop(
-                model_fn,
-                shape,
-                device=self.device,
-                progress=self.config['advanced'].get('show_progress', True),
-                eta=sampling_config.get('ddim_eta', 0.0)
-            )
-        else:  # ddpm
-            samples = self.diffusion.p_sample_loop(
-                model_fn,
-                shape,
-                device=self.device,
-                progress=self.config['advanced'].get('show_progress', True)
-            )
-        
-        return samples
     
     def _encode_conditions(self, condition_hints: Dict) -> torch.Tensor:
         """Encode condition hints for conditional sampling"""
@@ -568,17 +518,7 @@ class MicroscopySampler:
             
             return None
     
-    def _get_beta_schedule(self, schedule_name: str, num_timesteps: int) -> np.ndarray:
-        """Get beta schedule for diffusion sampling"""
-        if schedule_name == "linear":
-            # Use standard DDPM beta schedule parameters, scaled for the given number of timesteps
-            # Original DDPM used 1000 steps with beta_start=0.0001, beta_end=0.02
-            # We scale these parameters to maintain similar noise levels
-            beta_start = 0.0001
-            beta_end = 0.02
-            return np.linspace(beta_start, beta_end, num_timesteps, dtype=np.float64)
-        else:
-            raise NotImplementedError(f"Unknown beta schedule: {schedule_name}")
+    
     
     def _get_default_model_config(self) -> Dict:
         """Get default model configuration"""

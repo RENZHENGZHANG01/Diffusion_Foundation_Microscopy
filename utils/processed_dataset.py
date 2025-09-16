@@ -20,7 +20,7 @@ Supports two consumption modes:
 
 The goal is to give a unified PyTorch iterable returning tensors:
     sample = {
-        'image': FloatTensor[C,H,W] in [0,1],
+        'image': FloatTensor[C,H,W] in [-1,1],
         'id': str,
         'dataset': str,
         'task': str,
@@ -82,9 +82,8 @@ import csv
 import os
 import io
 import json
-import math
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 
@@ -336,7 +335,7 @@ class PreprocessedMicroscopyDataset(Dataset):
         if arr.ndim != 3:
             raise ValueError(f"Loaded array has shape {arr.shape}, expected (H,W,C)")
         arr = np.moveaxis(arr, -1, 0)  # C,H,W
-        tensor = torch.from_numpy(arr.astype(np.float32))  # already normalized [0,1]
+        tensor = torch.from_numpy(arr.astype(np.float32))  # already normalized [-1,1]
         
         # Parse normalization parameters from JSON strings if available
         norm_lo_dict = {}
@@ -540,33 +539,4 @@ def _default_collate_dict(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
     return out
 
 
-# ---------------------------------------------------------------------------
-# CLI helper for quick inspection
-# ---------------------------------------------------------------------------
-
-def _cli():  # pragma: no cover
-    import argparse
-    ap = argparse.ArgumentParser(description="Inspect processed microscopy datasets")
-    ap.add_argument('--roots', nargs='+', required=True)
-    ap.add_argument('--splits', nargs='*', default=None)
-    ap.add_argument('--limit', type=int, default=4)
-    ap.add_argument('--mode', choices=['manifest', 'wds'], default='manifest')
-    ap.add_argument('--list_file', type=str, help='Shard list file (for wds mode)')
-    args = ap.parse_args()
-
-    if args.mode == 'manifest':
-        ds = build_manifest_dataset(roots=args.roots, splits=args.splits)
-        print(f"Loaded {len(ds)} samples from manifest mode")
-        for i in range(min(args.limit, len(ds))):
-            s = ds[i]
-            print(f"[{i}] id={s['id']} shape={s['shape']} dataset={s['dataset']} path={s['path']}")
-    else:
-        loader = build_wds_dataloader(args.list_file, batch_size=1, shuffle=False)
-        for i, s in enumerate(loader):
-            print(f"[{i}] batch shape={s['image'].shape} ids={s['id']}")
-            if i + 1 >= args.limit:
-                break
-
-
-if __name__ == '__main__':  # pragma: no cover
-    _cli()
+ 
