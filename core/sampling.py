@@ -167,7 +167,7 @@ class MicroscopySampler:
         sigma_min = scheduler_config.get('sigma_min', edm_config.get('sigma_min', 0.002))
         sigma_max = scheduler_config.get('sigma_max', edm_config.get('sigma_max', 80.0))
         rho = scheduler_config.get('rho', edm_config.get('rho', 7.0))
-        sigma_data = scheduler_config.get('sigma_data', 0.5)
+        sigma_data = scheduler_config.get('sigma_data', 0.4)
         prediction_type = scheduler_config.get('prediction_type', 'sample')
 
         # Create EDM scheduler aligned with training
@@ -305,50 +305,59 @@ class MicroscopySampler:
         use_bf16 = use_cuda and torch.cuda.is_bf16_supported()
         amp_dtype = torch.bfloat16 if use_bf16 else torch.float16
         y_label = torch.zeros(shape[0], dtype=torch.long, device=self.device)
+        with torch.no_grad():
+            for i in step_iter:
+                idx = int(step_indices[i].item())
+                idx_next = int(step_indices[i + 1].item())
+                sigma_curr = sigmas[idx]
+                sigma_next = sigmas[idx_next]
 
-        for i in step_iter:
-            idx = int(step_indices[i].item())
-            idx_next = int(step_indices[i + 1].item())
-            sigma_curr = sigmas[idx]
-            sigma_next = sigmas[idx_next]
+                # Scale input according to EDM preconditioning (uses σ[idx])
+                timestep_vec = torch.full((shape[0],), idx, device=self.device, dtype=torch.long)
+                x_scaled = self.scheduler.scale_model_input(x, timestep_vec)
 
-            # Scale input according to EDM preconditioning (uses σ[idx])
-            timestep_vec = torch.full((shape[0],), idx, device=self.device, dtype=torch.long)
-            x_scaled = self.scheduler.scale_model_input(x, timestep_vec)
+                # Model prediction with EDM time embedding t_cont = log(σ/σ_data)/4
+                t_cont = torch.log(sigma_curr / self.scheduler.sigma_data) / 4.0
+                t_vec = t_cont.expand(shape[0])
 
-            # Model prediction with EDM time embedding t_cont = log(σ/σ_data)/4
-            t_cont = torch.log(sigma_curr / self.scheduler.sigma_data) / 4.0
-            t_vec = t_cont.expand(shape[0])
-
-            if condition_hints is not None and hasattr(self, 'condition_encoder'):
-                # Conditional sampling using model.forward with condition embedding
-                condition_emb = self._encode_conditions(condition_hints)
-                if use_cuda:
-                    with torch.autocast(device_type='cuda', dtype=amp_dtype):
+                if condition_hints is not None and hasattr(self, 'condition_encoder'):
+                    # Conditional sampling using model.forward with condition embedding
+                    condition_emb = self._encode_conditions(condition_hints)
+                    if use_cuda:
+                        with torch.autocast(device_type='cuda', dtype=amp_dtype):
+                            model_output = self.model.forward(x_scaled, t_vec, condition_emb)
+                    else:
                         model_output = self.model.forward(x_scaled, t_vec, condition_emb)
                 else:
-                    model_output = self.model.forward(x_scaled, t_vec, condition_emb)
-            else:
-                if use_cuda:
-                    with torch.autocast(device_type='cuda', dtype=amp_dtype):
+                    if use_cuda:
+                        with torch.autocast(device_type='cuda', dtype=amp_dtype):
+                            model_output = self.model.model(x_scaled, t_vec, y_label)
+                    else:
                         model_output = self.model.model(x_scaled, t_vec, y_label)
-                else:
-                    model_output = self.model.model(x_scaled, t_vec, y_label)
 
-            # Ensure channel compatibility: some models output 2*C (mean,var). Keep first C.
-            in_channels = x.shape[1]
-            if model_output.shape[1] != in_channels:
-                model_output = model_output[:, :in_channels, ...]
+                # Ensure channel compatibility: some models output 2*C (mean,var). Keep first C.
+                in_channels = x.shape[1]
+                if model_output.shape[1] != in_channels:
+                    model_output = model_output[:, :in_channels, ...]
 
-            # Match dtype to running sample tensor to avoid upcasting memory
-            model_output = model_output.to(dtype=x.dtype)
+                # Match dtype to running sample tensor to avoid upcasting memory
+                model_output = model_output.to(dtype=x.dtype)
 
-            # Euler step: x_{i+1} = x_i + (σ_{i+1} - σ_i) * (x_i - x0_hat)/σ_i
-            sigma_curr_b = sigma_curr.to(x.device)
-            while len(sigma_curr_b.shape) < len(x.shape):
-                sigma_curr_b = sigma_curr_b.unsqueeze(-1)
-            derivative = (x - model_output) / sigma_curr_b
-            x = x + (sigma_next - sigma_curr) * derivative
+                # Apply EDM boundary condition scaling to get proper x0 prediction
+                c_skip, c_out = self.scheduler.get_scalings_for_boundary_condition(timestep_vec)
+                while len(c_skip.shape) < len(x.shape):
+                    c_skip = c_skip.unsqueeze(-1)
+                    c_out = c_out.unsqueeze(-1)
+
+                # EDM boundary condition: x0_hat = c_skip * x_scaled + c_out * model_output
+                x0_hat = c_skip * x_scaled + c_out * model_output
+
+                # Euler step: x_{i+1} = x_i + (σ_{i+1} - σ_i) * (x_i - x0_hat)/σ_i
+                sigma_curr_b = sigma_curr.to(x.device)
+                while len(sigma_curr_b.shape) < len(x.shape):
+                    sigma_curr_b = sigma_curr_b.unsqueeze(-1)
+                derivative = (x - x0_hat) / sigma_curr_b
+                x = x + (sigma_next - sigma_curr) * derivative
 
         return x
     
@@ -414,9 +423,9 @@ class MicroscopySampler:
         # Decode latents
         with torch.no_grad():
             decoded = self.vae.decode(samples / self.config['vae']['scaling_factor']).sample
-        
-        # Convert from [-1, 1] to [0, 1]
-        decoded = (decoded + 1) / 2
+
+        # VAE typically outputs [-1, 1], keep as is since we handle conversion in save_samples
+        # decoded will be converted from [-1,1] to [0,1] in save_samples function
         
         # Convert to grayscale (take first channel)
         if decoded.shape[1] == 3:
@@ -433,15 +442,12 @@ class MicroscopySampler:
         
         # Convert to numpy
         samples_np = samples.detach().cpu().numpy()
-        
-        # Debug: print sample statistics before processing
-        # Normalize samples based on their actual range instead of hard clipping
-        if samples_np.max() > 1.0 or samples_np.min() < 0.0:
-            # If values are outside [0,1], normalize to [0,1] range preserving relative intensities
-            samples_np = (samples_np - samples_np.min()) / (samples_np.max() - samples_np.min())
-        else:
-            # Values already in [0,1], just ensure no negatives
-            samples_np = np.clip(samples_np, 0, 1)
+
+        # Convert from [-1,1] to [0,1] for saving as images
+        samples_np = (samples_np + 1.0) / 2.0
+
+        # Ensure values are in [0,1] range
+        samples_np = np.clip(samples_np, 0, 1)
         
         # Save individual samples
         if self.config['output'].get('save_individual', True):

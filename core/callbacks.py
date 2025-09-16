@@ -441,8 +441,8 @@ class SampleGenerationCallback(Callback):
                     samples = pl_module.vae.decode(samples / 0.18215).sample
                     samples = (samples + 1) / 2  # Convert from [-1,1] to [0,1]
                 else:
-                    # For pixel space, apply sigmoid to get [0,1] range
-                    samples = torch.sigmoid(samples)
+                    # For pixel space, convert from [-1,1] to [0,1] range (no sigmoid)
+                    samples = (samples + 1) / 2
                 
                 images = samples.cpu()
                 
@@ -509,11 +509,20 @@ class SampleGenerationCallback(Callback):
                     model_output = model_output[:, :x.shape[1], ...]
                 # debug disabled
 
+            # Apply EDM boundary condition scaling to get proper x0 prediction
+            c_skip, c_out = pl_module.scheduler.get_scalings_for_boundary_condition(timestep_vec)
+            while len(c_skip.shape) < len(x.shape):
+                c_skip = c_skip.unsqueeze(-1)
+                c_out = c_out.unsqueeze(-1)
+
+            # EDM boundary condition: x0_hat = c_skip * x_scaled + c_out * model_output
+            x0_hat = c_skip * scaled_x + c_out * model_output
+
             # Manual Euler step: x_{i+1} = x_i + (σ_{i+1} - σ_i) * (x_i - x0_hat)/σ_i
             sigma_curr_b = sigma_curr.to(x.device)
             while len(sigma_curr_b.shape) < len(x.shape):
                 sigma_curr_b = sigma_curr_b.unsqueeze(-1)
-            derivative = (x - model_output) / sigma_curr_b
+            derivative = (x - x0_hat) / sigma_curr_b
             x = x + (sigma_next - sigma_curr) * derivative
             # debug disabled
         

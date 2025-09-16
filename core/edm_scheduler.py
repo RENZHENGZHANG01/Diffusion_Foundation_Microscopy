@@ -24,7 +24,7 @@ class EDMEulerScheduler:
         num_train_timesteps: int = 1000,
         sigma_min: float = 0.002,
         sigma_max: float = 80.0,
-        sigma_data: float = 0.5,
+        sigma_data: float = 0.4,
         rho: float = 7.0,
         prediction_type: str = "sample",
         device: Optional[torch.device] = None
@@ -213,7 +213,7 @@ class EDMPreconditioner(nn.Module):
     def __init__(
         self,
         model: nn.Module,
-        sigma_data: float = 0.5,
+        sigma_data: float = 0.4,
         prediction_type: str = "sample"
     ):
         super().__init__()
@@ -292,7 +292,7 @@ def create_edm_scheduler(config: dict) -> EDMEulerScheduler:
         num_train_timesteps=scheduler_config.get('num_train_timesteps', 1000),
         sigma_min=scheduler_config.get('sigma_min', 0.002),
         sigma_max=scheduler_config.get('sigma_max', 80.0),
-        sigma_data=scheduler_config.get('sigma_data', 0.5),
+        sigma_data=scheduler_config.get('sigma_data', 0.4),
         rho=scheduler_config.get('rho', 7.0),
         prediction_type=scheduler_config.get('prediction_type', 'sample')
     )

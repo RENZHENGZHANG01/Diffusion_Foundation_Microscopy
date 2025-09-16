@@ -130,18 +130,22 @@ def _read_csv_rows(path: str) -> List[Dict[str, str]]:
 
 
 def _normalize_image(arr: np.ndarray) -> np.ndarray:
-    """Ensure float32 in [0,1]. Assume input already scaled if <=1 else scale by dtype max."""
+    """Ensure float32 in [-1,1] for EDM compatibility. Convert uint8 → [0,1] → [-1,1]."""
     if arr.dtype == np.float32 or arr.dtype == np.float64:
         # If values appear >1, attempt min-max (avoid changing distribution if already small)
         if arr.max() > 1.0:
             mn, mx = float(arr.min()), float(arr.max())
             if mx > mn:
                 arr = (arr - mn) / (mx - mn)
-        return arr.astype(np.float32)
+        # Convert [0,1] to [-1,1]
+        return (arr.astype(np.float32) * 2.0 - 1.0)
     if np.issubdtype(arr.dtype, np.integer):
         info = np.iinfo(arr.dtype)
-        return (arr.astype(np.float32) / float(info.max)).clip(0, 1)
-    return arr.astype(np.float32)
+        # Convert to [0,1] then to [-1,1]
+        arr_01 = (arr.astype(np.float32) / float(info.max)).clip(0, 1)
+        return arr_01 * 2.0 - 1.0
+    # Convert [0,1] to [-1,1]
+    return arr.astype(np.float32) * 2.0 - 1.0
 
 
 def _load_image(path: str) -> np.ndarray:
@@ -349,7 +353,7 @@ class PreprocessedMicroscopyDataset(Dataset):
             pass
         
         sample: Dict[str, Any] = {
-            'image': tensor,
+            'image': tensor,  # Now in [-1,1] range
             'id': r.id,
             'dataset': r.dataset,
             'task': r.task,
@@ -483,7 +487,7 @@ def build_wds_dataloader(
         arr = np.moveaxis(arr, -1, 0).astype(np.float32)
         tensor = torch.from_numpy(arr)
         out = {
-            'image': tensor,
+            'image': tensor,  # Now in [-1,1] range
             'id': key,
             'dataset': meta.get('dataset'),
             'source': meta.get('source'),

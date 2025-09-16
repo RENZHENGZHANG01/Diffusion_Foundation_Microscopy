@@ -6,6 +6,8 @@ Handles phase transitions, checkpoints, and state persistence
 
 import json
 import os
+import fcntl
+import time
 from pathlib import Path
 from typing import Dict, List
 
@@ -20,10 +22,31 @@ class MicroscopyPhaseManager:
         self.state = self.load_state()
     
     def load_state(self):
-        """Load or create phase state"""
+        """Load or create phase state with file locking"""
         if self.state_file.exists():
-            with open(self.state_file, 'r') as f:
-                return json.load(f)
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    with open(self.state_file, 'r') as f:
+                        fcntl.flock(f.fileno(), fcntl.LOCK_SH)  # Shared lock for reading
+                        content = f.read().strip()
+                        if not content:  # Empty file
+                            print(f"[WARNING] Empty state file found: {self.state_file}")
+                            return self._get_default_state()
+                        return json.loads(content)
+                except (json.JSONDecodeError, IOError, OSError) as e:
+                    if attempt < max_retries - 1:
+                        print(f"[WARNING] Attempt {attempt + 1} failed to read state file: {e}")
+                        time.sleep(0.1)  # Brief wait before retry
+                        continue
+                    else:
+                        print(f"[WARNING] Failed to read state file after {max_retries} attempts: {e}")
+                        print("[WARNING] Creating new state file")
+                        return self._get_default_state()
+        return self._get_default_state()
+    
+    def _get_default_state(self):
+        """Get default state structure"""
         return {
             'current_phase': 0,
             'completed_phases': [],
@@ -33,10 +56,25 @@ class MicroscopyPhaseManager:
         }
     
     def save_state(self):
-        """Save current state"""
+        """Save current state with file locking"""
         self.save_path.mkdir(parents=True, exist_ok=True)
-        with open(self.state_file, 'w') as f:
-            json.dump(self.state, f, indent=2)
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                with open(self.state_file, 'w') as f:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_EX)  # Exclusive lock for writing
+                    json.dump(self.state, f, indent=2)
+                    f.flush()
+                    os.fsync(f.fileno())  # Force write to disk
+                break
+            except (IOError, OSError) as e:
+                if attempt < max_retries - 1:
+                    print(f"[WARNING] Attempt {attempt + 1} failed to save state file: {e}")
+                    time.sleep(0.1)  # Brief wait before retry
+                    continue
+                else:
+                    print(f"[ERROR] Failed to save state file after {max_retries} attempts: {e}")
+                    raise
     
     def get_current_phase(self):
         """Get current phase config"""

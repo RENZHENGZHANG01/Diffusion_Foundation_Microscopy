@@ -98,7 +98,7 @@ class MicroscopyDiTModel(L.LightningModule):
             if self.phase_config['type'] == 'conditional':
                 self.edm_preconditioner = EDMPreconditioner(
                     model=self.model,
-                    sigma_data=scheduler_config.get('sigma_data', 0.5),
+                    sigma_data=scheduler_config.get('sigma_data', 0.4),
                     prediction_type=scheduler_config.get('prediction_type', 'sample')
                 )
             
