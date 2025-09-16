@@ -291,6 +291,15 @@ class MicroscopySampler:
         # Start with pure noise
         x = torch.randn(shape, device=self.device)
 
+        # Setup intermediate saving
+        save_intermediate = self.config['advanced'].get('save_intermediate', False)
+        intermediate_dir = None
+        if save_intermediate:
+            intermediate_dir = Path(self.config['advanced'].get('intermediate_dir', 'intermediate_samples'))
+            intermediate_dir.mkdir(parents=True, exist_ok=True)
+            # Save initial noise
+            self._save_intermediate_step(x, intermediate_dir, 0, "noise")
+
         # Build sigma schedule indices and iterate adjacent pairs so we step σ_i -> σ_{i+1}
         sigmas = self.scheduler.sigmas.to(self.device)
         num_steps = max(2, min(num_steps, len(sigmas)))
@@ -358,6 +367,17 @@ class MicroscopySampler:
                     sigma_curr_b = sigma_curr_b.unsqueeze(-1)
                 derivative = (x - x0_hat) / sigma_curr_b
                 x = x + (sigma_next - sigma_curr) * derivative
+
+                # Save intermediate steps
+                if save_intermediate and intermediate_dir is not None:
+                    # Save every 10 steps or at key points
+                    if (i + 1) % 10 == 0 or (i + 1) == len(step_indices) - 1:
+                        step_name = f"step_{i+1:03d}_sigma_{sigma_next.item():.3f}"
+                        self._save_intermediate_step(x, intermediate_dir, i + 1, step_name)
+
+        # Save final result if intermediate saving is enabled
+        if save_intermediate and intermediate_dir is not None:
+            self._save_intermediate_step(x, intermediate_dir, len(step_indices), "final")
 
         return x
     
@@ -474,7 +494,33 @@ class MicroscopySampler:
                 saved_paths.append(grid_path)
         
         return saved_paths
-    
+
+    def _save_intermediate_step(self, samples: torch.Tensor, intermediate_dir: Path, step: int, step_name: str):
+        """Save intermediate sampling step"""
+        try:
+            # Convert to numpy and normalize
+            samples_np = samples.detach().cpu().numpy()
+            samples_np = (samples_np + 1.0) / 2.0
+            samples_np = np.clip(samples_np, 0, 1)
+
+            # Save first sample only for intermediate steps
+            if samples_np.shape[0] > 0:
+                sample = samples_np[0]  # First sample
+                if sample.shape[0] == 1:  # Grayscale
+                    img_array = (sample[0] * 255).astype(np.uint8)
+                    img = Image.fromarray(img_array, mode='L')
+                else:  # RGB
+                    img_array = (sample.transpose(1, 2, 0) * 255).astype(np.uint8)
+                    img = Image.fromarray(img_array, mode='RGB')
+
+                # Save with descriptive filename
+                filename = f"{step_name}.png"
+                save_path = intermediate_dir / filename
+                img.save(save_path, dpi=(150, 150))
+
+        except Exception as e:
+            print(f"[WARNING] Failed to save intermediate step {step}: {e}")
+
     def _save_sample_grid(self, samples: np.ndarray, save_dir: Path, prefix: str) -> Optional[str]:
         """Save sample grid as single image"""
         try:
