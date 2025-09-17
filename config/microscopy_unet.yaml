@@ -1,0 +1,79 @@
+# Microscopy Diffusion Training Configuration (UNet + EDM) — Foundation
+
+data:
+  foundation_path: "../processed/foundation"
+  degraded_path: "../processed/degraded"
+
+model:
+  architecture: "Unet"
+  input_size: [512, 512]
+  # UNet defaults (foundation scale)
+  unet_base_channels: 64
+  unet_channel_mult: [1, 2, 4, 8, 8]
+  unet_time_dim: 256
+  # Latent params kept for compatibility
+  latent_size: 64
+  latent_channels: 4
+  condition_size: [512, 512]
+  target_size: [512, 512]
+
+vae:
+  enabled: false
+  model_id: "stabilityai/sd-vae-ft-ema"
+
+train:
+  accumulate_grad_batches: 1
+  dataloader_workers: 8
+  save_interval: 1000
+  gradient_checkpointing: false
+  save_path: "microscopy_runs_unet_foundation"
+
+  wandb:
+    project: "MicroscopyDiffusion-UNet"
+
+optimizer:
+  lr: 0.0001
+  weight_decay: 0.01
+  min_lr: 0.000001
+
+scheduler:
+  type: "EDMEulerScheduler"
+  num_train_timesteps: 1000
+  sigma_min: 0.002
+  sigma_max: 80.0
+  sigma_data: 0.4
+  rho: 7.0
+  prediction_type: "sample"
+
+ema:
+  enabled: true
+  decay: 0.9999
+  update_every: 1
+  start_step: 2000
+
+monitoring:
+  log_every_n_steps: 1000
+  val_check_interval: 1000
+  progress_bar: true
+  save_top_k: 2
+  monitor_metric: "val_loss"
+  image_log_every_n_steps: 0
+  image_log_max_images: 8
+  plot_loss: true
+  plot_lr: true
+  plot_samples: true
+  sample_every_n_epochs: 10
+  num_samples: 4
+  edm_steps: 100
+  sample_start_epoch: 1
+
+phases:
+  - name: "unet_foundation_phase1"
+    type: "unconditional"
+    epochs: 200
+    batch_size: 16
+    max_steps: -1
+    datasets: ["sr_caco2", "fmd", "neuronal_cells", "rxrx1"]  # replace with your full foundation dataset list if needed
+    epochs_to_save: [50, 100, 150, 200]
+    description: "UNet (EDM) unconditional prior on microscopy foundation dataset"
+
