@@ -65,7 +65,7 @@ class MicroscopyUnetModel(L.LightningModule):
         """
         return None
 
-    def _compute_edm_loss(self, latents: torch.Tensor) -> torch.Tensor:
+    def _compute_edm_loss(self, latents: torch.Tensor, condition_emb: Optional[torch.Tensor] = None) -> torch.Tensor:
         b = latents.shape[0]
         device = latents.device
         timesteps = torch.randint(0, self.scheduler.num_train_timesteps, (b,), device=device)
