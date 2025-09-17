@@ -17,6 +17,7 @@ from tqdm.auto import tqdm
 
 # Local imports
 from .models import MicroscopyDiTModel
+from .unet.model import MicroscopyUnetModel
 from .edm_scheduler import EDMEulerScheduler, EDMPreconditioner
 from .conditioning import DiTConditionEncoder, DiTConditionInjector, create_microscopy_conditions
 from diffusers.models import AutoencoderKL
@@ -97,8 +98,12 @@ class MicroscopySampler:
             model_config = self._get_default_model_config()
             phase_config = self._get_default_phase_config()
         
-        # Create model
-        self.model = MicroscopyDiTModel(model_config, phase_config)
+        # Create model based on architecture
+        arch = str(model_config.get('model', {}).get('architecture', model_config.get('architecture', 'DiT-S/8')))
+        if arch.lower() == 'unet':
+            self.model = MicroscopyUnetModel(model_config, phase_config)
+        else:
+            self.model = MicroscopyDiTModel(model_config, phase_config)
         
         # Load state dict
         if 'state_dict' in checkpoint:

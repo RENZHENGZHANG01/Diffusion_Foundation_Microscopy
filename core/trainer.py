@@ -15,6 +15,7 @@ import os
 
 # Local imports
 from .models import MicroscopyDiTModel, MicroscopyEvaluator
+from .unet.model import MicroscopyUnetModel
 from .datasets import MicroscopyDataset, ValidationDataset
 from .phase_manager import MicroscopyPhaseManager
 from .callbacks import (
@@ -47,11 +48,18 @@ class MicroscopyTrainer:
         print(f"[INFO] Type: {phase_config['type']}")
         print(f"[INFO] Epochs: {phase_config['epochs']}")
         
-        # Create model
-        model = MicroscopyDiTModel(
-            config=self.config,
-            phase_config=phase_config
-        )
+        # Create model based on architecture
+        architecture = str(self.config.get('model', {}).get('architecture', 'DiT-S/8'))
+        if architecture.lower() == 'unet':
+            model = MicroscopyUnetModel(
+                config=self.config,
+                phase_config=phase_config
+            )
+        else:
+            model = MicroscopyDiTModel(
+                config=self.config,
+                phase_config=phase_config
+            )
         
         # Setup data
         train_dataset = MicroscopyDataset(self.config, phase_config)
@@ -181,17 +189,29 @@ class MicroscopyTrainer:
         
         # Get latest checkpoint saved by CustomCheckpointCallback or ModelCheckpoint
         best_checkpoint = None
+        # Prefer best, fall back to last
         for cb in callbacks:
-            if isinstance(cb, ModelCheckpoint) and getattr(cb, 'best_model_path', None):
-                best_checkpoint = cb.best_model_path
+            if isinstance(cb, ModelCheckpoint):
+                if getattr(cb, "best_model_path", None):
+                    best_checkpoint = cb.best_model_path
+                elif getattr(cb, "last_model_path", None):
+                    best_checkpoint = cb.last_model_path
             if isinstance(cb, CustomCheckpointCallback):
                 # Custom callback saves at fixed epochs; take the most recent file if exists
                 # We can't easily read its internals, so default to trainer.checkpoint_callback if available
                 pass
         
-        # Evaluate final model
+        # If EMA is used, validate with EMA weights
+        try:
+            ema_cb = next(cb for cb in callbacks if getattr(cb, "name", "") == "EMA" or cb.__class__.__name__ == "EMACallback")
+        except StopIteration:
+            ema_cb = None
+        if ema_cb is not None and hasattr(ema_cb, "apply_ema_weights") and hasattr(ema_cb, "restore_original_weights"):
+            ema_cb.apply_ema_weights(model)
         evaluator = MicroscopyEvaluator(model)
         final_metrics = evaluator.compute_metrics(val_loader)
+        if ema_cb is not None and hasattr(ema_cb, "restore_original_weights"):
+            ema_cb.restore_original_weights(model)
         
         # Complete phase
         self.phase_manager.complete_phase(best_checkpoint, final_metrics)
