@@ -59,6 +59,12 @@ class MicroscopyUnetModel(L.LightningModule):
     def forward(self, x: torch.Tensor, t: torch.Tensor, y: Optional[torch.Tensor] = None) -> torch.Tensor:
         return self.model(x, t, y)
 
+    def encode_conditions(self, batch) -> Optional[torch.Tensor]:
+        """Placeholder to mirror MicroscopyDiTModel API.
+        UNet path currently trains unconditional; return None to satisfy evaluator.
+        """
+        return None
+
     def _compute_edm_loss(self, latents: torch.Tensor) -> torch.Tensor:
         b = latents.shape[0]
         device = latents.device
