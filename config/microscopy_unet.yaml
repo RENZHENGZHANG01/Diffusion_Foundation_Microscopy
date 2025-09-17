@@ -47,7 +47,7 @@ scheduler:
 
 ema:
   enabled: true
-  decay: 0.9999
+  decay: 0.9995
   update_every: 1
   start_step: 2000
 
